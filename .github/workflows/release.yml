@@ -288,3 +288,27 @@ jobs:
         with:
           name: linux-x86_64
           path: '*.AppImage'
+
+  # Les trois paquets finissent dans une release GitHub nommée comme le tag. Une plateforme en
+  # échec ne retient pas les autres : la release reçoit ce qui a été construit.
+  publish:
+    needs: [macos, windows, linux]
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Release GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l artifacts
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+                 --title "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" artifacts/* --repo "$GITHUB_REPOSITORY" --clobber
