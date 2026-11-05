@@ -35,10 +35,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Qt 6.11.1
+      - name: Qt 6.11.2
         uses: jurplel/install-qt-action@v4
         with:
-          version: '6.11.1'
+          version: '6.11.2'
           cache: true
 
       - name: Trame
