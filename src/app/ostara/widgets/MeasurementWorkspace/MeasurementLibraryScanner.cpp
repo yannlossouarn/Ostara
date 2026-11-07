@@ -135,7 +135,8 @@ auto IsInLibrary(const QString &libPath, const QString &canonicalPath) -> bool
         return false;
     }
 
-    return file == root || file.startsWith(root + QDir::separator());
+    // Canonical paths always use '/', also on Windows, where QDir::separator() is '\\'.
+    return file == root || file.startsWith(root + QLatin1Char('/'));
 }
 
 } // namespace MeasurementLibraryScanner

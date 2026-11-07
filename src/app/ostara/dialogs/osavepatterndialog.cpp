@@ -212,8 +212,10 @@ void OSavePatternDialog::PopulateTree()
     QString wanted = m_library;
     if (not m_currentPath.isEmpty())
     {
+        // Qt paths use '/' on every system: compare in that form, not with QDir::separator().
         const QString folder = QFileInfo(m_currentPath).absolutePath();
-        if (folder == m_library || folder.startsWith(m_library + QDir::separator()))
+        const QString library = QDir::cleanPath(m_library);
+        if (folder == library || folder.startsWith(library + QLatin1Char('/')))
         {
             wanted = folder;
         }
