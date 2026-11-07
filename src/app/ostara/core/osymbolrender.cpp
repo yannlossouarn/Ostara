@@ -38,6 +38,12 @@
 #include <QPolygonF>
 #include <QTransform>
 
+#if QT_VERSION < QT_VERSION_CHECK(6, 9, 0)
+#include "vbackport/qpainterstateguard.h"
+#else
+#include <QPainterStateGuard>
+#endif
+
 #include <algorithm>
 
 namespace

@@ -27,19 +27,37 @@ jobs:
         include:
           - arch: arm64
             label: Apple-Silicon
+            qt: '6.11.2'
+            target: '13.0'
           - arch: x86_64
             label: Intel
+            qt: '6.11.2'
+            target: '13.0'
+          # Qt 6.11 exige macOS 13 : pour Monterey (macOS 12), Qt 6.8 LTS, dernière version libre 6.8.3.
+          - arch: arm64
+            label: Apple-Silicon-macOS-12
+            qt: '6.8.3'
+            target: '12.0'
+          - arch: x86_64
+            label: Intel-macOS-12
+            qt: '6.8.3'
+            target: '12.0'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Qt 6.11.2
+      - name: Qt ${{ matrix.qt }}
         uses: jurplel/install-qt-action@v4
         with:
-          version: '6.11.2'
+          version: ${{ matrix.qt }}
           cache: true
+
+      # Qt 6.8 lie AGL, absent des SDK récents ; Qt 6 n'en appelle aucune fonction.
+      - name: Qt 6.8 sans AGL
+        if: startsWith(matrix.qt, '6.8')
+        run: sed -i '' '/INTERFACE ${__opengl_agl_fw_path}/d' "$QT_ROOT_DIR/lib/cmake/Qt6/FindWrapOpenGL.cmake"
 
       - name: Trame
         run: git clone --depth 1 --branch v0.1.0 https://github.com/equinox-patterns/Trame.git ../Trame
@@ -53,7 +71,7 @@ jobs:
           cmake -S xerces-c-3.3.0 -B xerces-build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.target }} \
             -DCMAKE_INSTALL_PREFIX="$PWD/xerces-install" \
             -DBUILD_SHARED_LIBS=ON \
             -Dnetwork=OFF
@@ -64,7 +82,7 @@ jobs:
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.target }} \
             -DCMAKE_PREFIX_PATH="$PWD/xerces-install"
 
       - name: Compiler
@@ -88,7 +106,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-${{ matrix.arch }}
+          name: macos-${{ matrix.label }}
           path: '*.dmg'
 
   windows:

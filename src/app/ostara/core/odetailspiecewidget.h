@@ -115,7 +115,7 @@ public:
     void RestoreGeneralTab();
 
     /** @brief True while this page displays a piece. */
-    auto IsShowingPiece() const -> bool { return m_pieceId != NULL_ID && m_currentTool != nullptr; }
+    auto IsShowingPiece() const -> bool { return m_pieceId != NULL_ID && !m_currentTool.isNull(); }
 
 signals:
     void ShowStatusTip(const QString &text);
