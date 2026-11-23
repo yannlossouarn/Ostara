@@ -29,6 +29,7 @@
  *************************************************************************/
 
 #include "vtoolcutsplinepath.h"
+#include "../../../operation/ocopypieces.h"
 
 #include <QPointF>
 #include <QSharedPointer>
@@ -268,7 +269,7 @@ auto VToolCutSplinePath::Create(VToolCutInitData &initData) -> VToolCutSplinePat
 
     patternGraph->AddVertex(initData.id, VNodeType::TOOL, initData.doc->PatternBlockMapper()->GetActiveId());
 
-    const auto varData = initData.data->DataDependencyVariables();
+    const auto varData = initData.doc->DependencyVariables(initData.data);
     initData.doc->FindFormulaDependencies(initData.formula, initData.id, varData);
 
     initData.data->AddSpline(initData.data->GeometricObject<VAbstractBezier>(initData.segment1Id), initData.segment1Id);
@@ -281,6 +282,14 @@ auto VToolCutSplinePath::Create(VToolCutInitData &initData) -> VToolCutSplinePat
     patternGraph->AddEdge(initData.id, initData.segment2Id);
 
     patternGraph->AddEdge(initData.baseCurveId, initData.id);
+
+    // The copies an operation made of the curve are cut too, at the place this point was carried to. Read from the
+    // file, a copy can come before its cut — it was made before the curve was cut — and was built with nothing to
+    // follow: it follows now. A cut made from its dialog is followed once it is written (VToolCut::AddToFile).
+    if (initData.typeCreation != Source::FromGui)
+    {
+        OCopyPieces::FollowCut(initData.doc, initData.data, initData.baseCurveId);
+    }
 
     if (initData.typeCreation != Source::FromGui && initData.parse != Document::FullParse)
     {

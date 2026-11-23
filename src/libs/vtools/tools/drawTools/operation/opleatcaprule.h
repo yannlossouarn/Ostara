@@ -48,7 +48,7 @@
 #include <QSharedPointer>
 #include <QtGlobal>
 
-#include "../../vgeometry/vabstractcurve.h"
+#include "vgeometry/vabstractcurve.h"
 #include "opleatrule.h"
 
 class VContainer;
@@ -69,6 +69,10 @@ struct OPleatCapPlacement
     quint32 edgeId{NULL_ID};
     qreal length{0.};
     bool fromStart{false};
+
+    /** @brief The way the edge was read: the direction that chose which piece of a path carries it, kept so that the
+     *  figure cuts the piece the apex was measured on and not the first one the path happens to offer. */
+    QPointF inward{};
 };
 
 /**

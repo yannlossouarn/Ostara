@@ -26,6 +26,7 @@
  *************************************************************************/
 
 #include "opiecelibrarydialog.h"
+#include "../../../libs/vmisc/vabstractvalapplication.h"
 
 #include "olibraryfolderdialog.h"
 
@@ -576,7 +577,13 @@ void OPieceLibraryDialog::ShowDetails()
         // No choice yet — which is also what an empty library looks like, what a folder holding nothing looks
         // like, and what a search that matches nothing looks like. Saying which of the three it is is the
         // difference between a window that answers and a window that looks broken.
-        if (m_all.isEmpty())
+        if (not QDir(m_directory).exists())
+        {
+            // The folder is gone — a fourth state, which used to read as "no piece saved yet" and made a
+            // moved library look emptied, since Ostara recreates its folders empty at startup.
+            m_stateLabel->setText(tr("This folder does not exist. Check its path in Settings."));
+        }
+        else if (m_all.isEmpty())
         {
             m_stateLabel->setText(tr("No piece is saved in the library yet."));
         }
@@ -818,6 +825,7 @@ void OPieceLibraryDialog::ExportPiece(int row)
         return;
     }
 
+    // Modal window: see the same note in the pattern library dialog.
     QMessageBox::information(this, tr("Export successful"), tr("Piece exported to:\n%1").arg(target));
 }
 
@@ -839,7 +847,7 @@ void OPieceLibraryDialog::DeletePiece(int row)
     QString error;
     if (not OPieceLibrary::Remove(summary.path, &error))
     {
-        QMessageBox::warning(this, tr("Error"), error);
+        QMessageBox::warning(this, tr("Piece library"), error);
         return;
     }
 
@@ -895,7 +903,8 @@ auto OPieceLibraryDialog::FreeImportPath(const QString &directory, const QString
         const QString trimmed = asked.trimmed();
         if (trimmed.isEmpty() || trimmed.contains(QLatin1Char('/')))
         {
-            QMessageBox::warning(this, tr("Import a piece"), tr("A piece name cannot be empty nor hold a slash."));
+            QMessageBox::warning(this, tr("Import a piece"),
+                                 tr("A piece name cannot be empty nor hold a slash. Give it another name."));
             continue;
         }
 

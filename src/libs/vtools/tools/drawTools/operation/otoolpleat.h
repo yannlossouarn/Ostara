@@ -54,6 +54,7 @@
 template <class T> class QSharedPointer;
 class QDomElement;
 class QGraphicsSceneContextMenuEvent;
+class VContainer;
 class VFormula;
 
 struct OToolPleatInitData : VAbstractOperationInitData
@@ -168,12 +169,16 @@ public:
     auto KeptInPlace() const -> QSet<quint32> override;
 
 public slots:
-    /** @brief Give the figure the items of the objects the parse has just created, and take away those of the
-     *  objects it no longer holds.
+    /** @brief Put the copies and the figure back where the points they are read from now stand, then give the
+     *  figure the items of the objects the parse holds and take away those of the objects it no longer holds.
      *
-     *  A lite parse creates the objects of the figure in the container and never removes one — only a full parse
-     *  empties it — so the scene follows the *figure*, never what the container happens to hold: what the file no
-     *  longer names loses its item, and what it names gains one. */
+     *  Only a full parse builds this tool and the objects of its figure; a lite one — the parse every move of a
+     *  point asks for — leaves them with the ids the file gave, and with the places the last full parse computed.
+     *  A point the pleat is taken on moves, and the pleat does not follow it: the refresh below is what makes it
+     *  follow, and it may only reposition what the file has already named (see RefreshDerivedGeometry).
+     *
+     *  The scene then follows the *figure*, never what the container happens to hold: what the file no longer
+     *  names loses its item, and what it names gains one. */
     void FullUpdateFromFile() override;
 
 protected slots:
@@ -200,6 +205,12 @@ protected:
     auto ExtraCurveIds() const -> QVector<quint32> override;
     auto ExtraLineIds() const -> QVector<quint32> override;
 
+    /** @brief The figure is ONE thing: a layer names one of its objects and the whole figure follows it.
+     *  The base class hides the one image the layer names, which is what a rotation, a move or a flipping
+     *  needs; here the images are the parts of a single figure, and hiding them one by one would leave the
+     *  rest of it drawn on a hidden layer. */
+    void GroupVisibility(quint32 object, bool visible) override;
+
     auto FigureFollowsLiteParse(const QDomElement &oldElement, const QDomElement &newElement) const -> bool override;
 
     auto DisplayObjectIds(const QDomElement &domElement) const -> QSet<quint32> override;
@@ -212,12 +223,39 @@ private:
     OPleatOrigin m_origin{OPleatOrigin::FirstArm};
     OPleatDisplay m_display{};
 
+    /** @brief The container of the pattern — not the copy a tool keeps for itself.
+     *
+     *  The copies and the figure are objects the operation derives, and a tool's own copy detaches on its first
+     *  write: written there, they would be drawn, `HasObject` would answer for them, and the rest of the pattern
+     *  would ignore them (the same defect the portions of a spline path paid for). Kept from the creation, exactly
+     *  as VToolSplinePath keeps it for the pieces of a cut curve. */
+    VContainer *m_patternData{nullptr};
+
+    /** @brief Recompute the copies and the figure on the points they are read from, under the ids they already
+     *  carry, without handing out an id nor taking one away.
+     *
+     *  EnsureIds is asked first on a copy of the figure: it gives an id to every entry that has none and drops the
+     *  ones the plan no longer describes, so a figure it would re-letter is left exactly as it is — only a full
+     *  parse may rebuild it.
+     *
+     *  @return true when the container was written, false when the figure was left untouched. */
+    auto RefreshDerivedGeometry() -> bool;
+
     /** @brief The two points of the departure line of the first pleat: the fold the whole operation is taken on, and
      *  the pair a layer must leave where they are (see the override of KeptInPlace).
      *
      *  Written once, because the creation and the override answer the same question — they were written twice, and the
      *  spec keeps the defect it cost: a layer ticked after the fact did not follow the exclusion on one of the two. */
     static auto KeptInPlace(const QVector<OPleatDeparture> &departures) -> QSet<quint32>;
+
+    /** @brief Put the pleat back in the dependency graph: its vertex, the formulas of its values, what it reads, its
+     *  copies and the points and curves of its figure.
+     *
+     *  Every parse but the value-only one empties the graph, so this runs on every parse, the lite one included —
+     *  where the figure itself is not rebuilt. Written once because both paths must answer the same: a pleat missing
+     *  from the graph after a lite parse could not be deleted until the file was reopened (its delete read "pending"
+     *  as "in use"), and an object of its figure really in use went unseen. */
+    static void RegisterInGraph(OToolPleatInitData &initData);
 
     explicit OToolPleat(const OToolPleatInitData &initData, QGraphicsItem *parent = nullptr);
 

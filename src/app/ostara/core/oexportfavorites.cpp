@@ -48,8 +48,16 @@ constexpr auto kBaseC = "baseC";
 constexpr auto kMargin = "marginMm";
 constexpr auto kGap = "gapMm";
 constexpr auto kPrintModelToken = "printModelToken";
+/// La longueur maximale d'une page de rouleau — absente quand elle n'a pas été choisie (500 cm).
+constexpr auto kMaxPageLength = "maxPageLengthMm";
+/// L'export PDF hors marges droite/gauche — absent quand il est faux.
+constexpr auto kTrimSideMargins = "trimSideMargins";
 constexpr auto kColumns = "columns";
 constexpr auto kFrameHeight = "frameHeightMm";
+/// Le sens du document demandé — vrai quand il est paysage. Absent : portrait, donc rien à écrire.
+constexpr auto kDocumentLandscape = "documentLandscape";
+/// La forme de page du format Projecteur — carré, portrait ou paysage.
+constexpr auto kPageShape = "pageShape";
 constexpr auto kMarksTemplate = "marksTemplateName";
 constexpr auto kCoverPageTemplate = "coverPageTemplateName";
 constexpr auto kPinnedAxes = "pinnedAxes";
@@ -90,8 +98,30 @@ auto RecipeOf(const OExportRunRequest &request) -> QVariantMap
     record.insert(QLatin1String(kMargin), request.marginMm);
     record.insert(QLatin1String(kGap), request.gapMm);
     record.insert(QLatin1String(kPrintModelToken), request.printModelToken);
+    if (request.maxPageLengthMm > 0.0)
+    {
+        // Le défaut (zéro, c'est-à-dire 500 cm) ne s'écrit pas, comme le portrait : une fiche
+        // écrite avant ce champ se relit avec le plafond du PDF, qui est ce qu'elle faisait.
+        record.insert(QLatin1String(kMaxPageLength), request.maxPageLengthMm);
+    }
+    if (request.trimSideMargins)
+    {
+        record.insert(QLatin1String(kTrimSideMargins), true);
+    }
     record.insert(QLatin1String(kColumns), request.columns);
     record.insert(QLatin1String(kFrameHeight), request.frameHeightMm);
+    if (request.documentLandscape)
+    {
+        // Écrit seulement quand il n'est pas le défaut, comme les attributs de la recette : une
+        // fiche écrite avant ce champ se relit en portrait, ce qu'elle était.
+        record.insert(QLatin1String(kDocumentLandscape), true);
+    }
+    if (request.pageShape != OExportPageShape::Square)
+    {
+        // Même règle : le défaut ne s'écrit pas. Une fiche d'avant ce champ se relit donc en carré,
+        // qui est le défaut — et c'est le choix qu'elle n'a jamais fait, puisqu'il n'existait pas.
+        record.insert(QLatin1String(kPageShape), static_cast<int>(request.pageShape));
+    }
     record.insert(QLatin1String(kMarksTemplate), request.marksTemplateName);
     record.insert(QLatin1String(kCoverPageTemplate), request.coverPageTemplateName);
     record.insert(QLatin1String(kPinnedAxes), pinned);
@@ -131,8 +161,16 @@ auto RequestOf(const QVariantMap &record) -> OExportRunRequest
     request.marginMm = record.value(QLatin1String(kMargin), request.marginMm).toDouble();
     request.gapMm = record.value(QLatin1String(kGap), request.gapMm).toDouble();
     request.printModelToken = record.value(QLatin1String(kPrintModelToken), request.printModelToken).toString();
+    request.maxPageLengthMm =
+        record.value(QLatin1String(kMaxPageLength), request.maxPageLengthMm).toDouble();
+    request.trimSideMargins =
+        record.value(QLatin1String(kTrimSideMargins), request.trimSideMargins).toBool();
     request.columns = record.value(QLatin1String(kColumns), request.columns).toInt();
     request.frameHeightMm = record.value(QLatin1String(kFrameHeight), request.frameHeightMm).toDouble();
+    request.documentLandscape = record.value(QLatin1String(kDocumentLandscape),
+                                             request.documentLandscape).toBool();
+    request.pageShape = static_cast<OExportPageShape>(
+        record.value(QLatin1String(kPageShape), static_cast<int>(request.pageShape)).toInt());
     request.marksTemplateName = record.value(QLatin1String(kMarksTemplate), request.marksTemplateName).toString();
     request.coverPageTemplateName =
         record.value(QLatin1String(kCoverPageTemplate), request.coverPageTemplateName).toString();

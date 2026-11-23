@@ -31,6 +31,7 @@
 #include "opleatrule.h"
 
 #include <algorithm>
+#include <utility>
 
 #include <QLineF>
 #include <QPair>
@@ -120,10 +121,12 @@ auto AgreedDirection(const QVector<QPointF> &directions) -> QPointF
 }
 
 //---------------------------------------------------------------------------------------------------------------------
-/** @brief The tangent at one of the two ends of a path of cubic beziers: the handle leaving that end.
+/** @brief The tangent at a node of a path of cubic beziers: the handle leaving that node.
  *
- *  The sub-splines of a path are numbered from one — `GetSpline(0)` throws — and the last one carries the end of
- *  the path, not the one before it. */
+ *  The sub-splines of a path are numbered from one — `GetSpline(0)` throws — and every node of the path is the end
+ *  of one sub-spline and the start of the next. The edge that a cap is read on is the piece that ends at that node,
+ *  so a node in the middle of the path answers as well as its two ends: what a point merely passing through a
+ *  *curve* never gives, a point that is a node of a *path* always gives. */
 auto TangentAtPath(const VAbstractCubicBezierPath &path, const QPointF &point) -> QPointF
 {
     const vsizetype count = path.CountSubSpl();
@@ -132,16 +135,18 @@ auto TangentAtPath(const VAbstractCubicBezierPath &path, const QPointF &point) -
         return {};
     }
 
-    const VSpline first = path.GetSpline(1);
-    if (VFuzzyComparePoints(static_cast<QPointF>(first.GetP1()), point))
+    for (vsizetype i = 1; i <= count; ++i)
     {
-        return static_cast<QPointF>(first.GetP2()) - static_cast<QPointF>(first.GetP1());
-    }
+        const VSpline spline = path.GetSpline(i);
+        if (VFuzzyComparePoints(static_cast<QPointF>(spline.GetP1()), point))
+        {
+            return static_cast<QPointF>(spline.GetP2()) - static_cast<QPointF>(spline.GetP1());
+        }
 
-    const VSpline last = path.GetSpline(count);
-    if (VFuzzyComparePoints(static_cast<QPointF>(last.GetP4()), point))
-    {
-        return static_cast<QPointF>(last.GetP4()) - static_cast<QPointF>(last.GetP3());
+        if (VFuzzyComparePoints(static_cast<QPointF>(spline.GetP4()), point))
+        {
+            return static_cast<QPointF>(spline.GetP4()) - static_cast<QPointF>(spline.GetP3());
+        }
     }
 
     return {};
@@ -460,18 +465,40 @@ void CandidatesFromSegments(const QPointF &position, const QPointF &side, const 
 /** @brief The candidate that leaves the point the way @a side points, or none.
  *
  *  At a cut both halves end at the point and leave it in opposite directions: the side is the only thing that tells
- *  which of the two the notch is cut into. */
+ *  which of the two the notch is cut into.
+ *
+ *  The one kept is the one that agrees with the side **the most**, and not the first one met: the candidates come
+ *  from a hash, whose order is the pattern's business and not the fold's, and a direction merely *touching* the side
+ *  — a candidate that leaves the point square to it, a dot of some ten thousand billionths — used to win by coming
+ *  first. A cap was then read on the piece the side never pointed at, and the same pattern answered two different
+ *  ways from one parse to the next. */
 auto ChosenCarrier(const QVector<OEdgeCarrier> &candidates, const QPointF &side) -> OEdgeCarrier
 {
+    const qreal sideLength = QLineF(QPointF(), side).length();
+    if (sideLength <= kDirectionTolerance)
+    {
+        return {};
+    }
+
+    OEdgeCarrier chosen;
+    qreal best = 0.; // a direction square to the side agrees with it not at all: it is no answer
     for (const OEdgeCarrier &candidate : candidates)
     {
-        if (Dot(candidate.inward, side) > 0.)
+        const qreal length = QLineF(QPointF(), candidate.inward).length();
+        if (length <= kDirectionTolerance)
         {
-            return candidate;
+            continue;
+        }
+
+        const qreal agreement = Dot(candidate.inward / length, side / sideLength);
+        if (agreement > best)
+        {
+            best = agreement;
+            chosen = candidate;
         }
     }
 
-    return {};
+    return chosen;
 }
 
 /** One block of the outline of a piece: a single point, or the samples of a curve. */
@@ -739,6 +766,34 @@ auto OEdgeReader::Carrier(quint32 pointId, const QPointF &side, const VContainer
                 }
             }
             candidates = carried;        }
+
+        // **A piece of a path answers for the edge, never the path itself, when the pattern holds the piece.** The
+        // two pieces a path was cut at a node into end at that very node, and each carries the edge the cap and the
+        // notch follow — the whole path does not: its own ends are elsewhere, so a notch read on it has nowhere to
+        // walk (OPleatNotchRule::Place asks for an end), and a cap has to be cut out of it again by a direction the
+        // sense no longer carries, which is how the cap of one sense came to be drawn for the other. Splitting the
+        // curve — `segmentAtCarrure`, and every cut that leaves two pieces beside its point — is exactly what makes
+        // those pieces exist, and this is where they are taken.
+        QVector<OEdgeCarrier> pieces;
+        for (const OEdgeCarrier &candidate : std::as_const(candidates))
+        {
+            if (candidate.objectId == NULL_ID || not data->HasObject(candidate.objectId))
+            {
+                continue; // a line, or an object the pattern no longer holds: the fallback below answers those
+            }
+
+            const QSharedPointer<VAbstractCurve> curve
+                = qSharedPointerDynamicCast<VAbstractCurve>(data->GetGObject(candidate.objectId));
+            if (curve.isNull() || qSharedPointerDynamicCast<VAbstractCubicBezierPath>(curve).isNull())
+            {
+                pieces.append(candidate); // a curve that is not a path is one piece already
+            }
+        }
+
+        if (const OEdgeCarrier chosen = ChosenCarrier(pieces, side); chosen.objectId != NULL_ID)
+        {
+            return chosen;
+        }
 
         if (const OEdgeCarrier chosen = ChosenCarrier(candidates, side); chosen.objectId != NULL_ID)
         {

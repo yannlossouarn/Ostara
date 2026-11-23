@@ -36,6 +36,7 @@
 
 #include "core/oexportoutput.h"
 #include "core/oexportpieces.h"
+#include "core/oexportrollpages.h"
 #include "core/oexportrecipe.h"
 #include "core/oexporttemplate.h"
 
@@ -127,12 +128,27 @@ auto OExportPdf::Write(const OExportOutput &output, const QString &pdfPath,
                        const VContainer *pattern, VAbstractPattern *doc,
                        const OExportTemplate *marks, bool framed, bool addLayoutLayer,
                        const OExportCoverPage::Drawing *cover, bool rabnestPayload,
-                       const QString &gradedDrawing) -> bool
+                       const QString &gradedDrawing, QString *error) -> bool
 {
+    // ⚠️ **La raison remonte, et elle est vraie.** La boîte de dialogue disait « vérifiez que le
+    // dossier autorise l'écriture » quelle que soit la panne — phrase fausse dès que l'échec vient
+    // d'autre part, et qui envoie chercher un dossier parfaitement inscriptible. Chaque sortie dit
+    // donc ce qui l'a provoquée, et l'appelant la répète.
+    const auto fail = [error](const QString &reason) -> bool {
+        if (error != nullptr)
+        {
+            *error = reason;
+        }
+        return false;
+    };
+    const auto reason = [](const char *text) {
+        return QCoreApplication::translate("OExportPdf", text);
+    };
+
     if (pattern == nullptr || doc == nullptr || output.layers.isEmpty() || !output.result.ok)
     {
         qWarning() << "OExportPdf: the generation cannot be reproduced";
-        return false;
+        return fail(reason("the generation cannot be drawn again"));
     }
 
     // Draw the generation the way the canvas draws it, and take back what was drawn. The
@@ -222,6 +238,35 @@ auto OExportPdf::Write(const OExportOutput &output, const QString &pdfPath,
                                     artboards.planRect.top() + row * artboards.cellHeightPx,
                                     artboards.cellWidthPx, artboards.cellHeightPx));
             }
+        }
+    }
+    else if (!output.projectorPagesPx.isEmpty())
+    {
+        // **Un plan projeté qui ne tient pas sous 500 × 500 cm est coupé en pages.** Chacune fait la
+        // taille de son contenu — elles n'ont donc pas toutes la même largeur, et c'est voulu : un
+        // projecteur ne paie pas de papier, il paie de la surface à projeter.
+        //
+        // ⚠️ Le writer écrit un `/MediaBox` **par page** (`SvgToOcgPdf.cpp`) : rien à lui apprendre,
+        // il lui suffit de recevoir les rectangles. Il ne découpe pas non plus le contenu — c'est le
+        // `/MediaBox` qui décide de ce qui se voit.
+        pages = output.projectorPagesPx;
+    }
+    else if (output.format == OExportFormat::Kind::Print)
+    {
+        // **Un rouleau n'a pas de feuille, mais il a des pages.** Sa longueur est celle du patron,
+        // et deux choses la coupent : la longueur demandée (la machine à plier de l'imprimante) et
+        // le plafond du PDF (500 cm). Aucune pièce n'est à cheval : les pages se ferment entre elles.
+        //
+        // Le calcul est une fonction des placements, jamais un état gardé : une correction à la main
+        // déplace la découpe avec la pièce, au lieu de laisser une page qui ne correspond plus.
+        //
+        // ⚠️ `frameHeightMm` vaut zéro sur un rouleau : c'est le seul format d'impression qui arrive
+        // ici sans artboards. Les tuilés ont leur grille, le projecteur ses pages, et le rouleau
+        // celles-ci.
+        pages = OExportRollPages::Compute(output.result.placements, OExportRollPages::SettingsOf(output)).pages;
+        if (pages.isEmpty())
+        {
+            pages.append(QRectF(0.0, 0.0, output.result.binWidthPx, output.result.usedHeightPx));
         }
     }
     else
@@ -337,7 +382,7 @@ auto OExportPdf::Write(const OExportOutput &output, const QString &pdfPath,
     if (!dir.isValid())
     {
         qWarning() << "OExportPdf: no temporary directory";
-        return false;
+        return fail(reason("there is no temporary folder to draw in"));
     }
 
     // ONE SVG, over the whole plan — not one per sheet. The drawing below is the same
@@ -351,7 +396,30 @@ auto OExportPdf::Write(const OExportOutput &output, const QString &pdfPath,
     // the PDF. A page is the plan read through a rectangle — and the writer does not crop
     // to what it is handed, it only sizes the root and shifts the content, so the plan
     // being whole here is exactly what each page needs.
-    const QRectF imageRect = artboards.valid ? artboards.planRect : pages.first();
+    // **Le plan entier, jamais la première page.** Une projection découpée a plusieurs rectangles et
+    // pas de grille : prendre le premier dessinerait la page 1 et couperait tout le reste.
+    //
+    // ⚠️ **Un rouleau garde le bac comme image, même quand ses pages sont rognées.** Le SVG doit
+    // commencer à l'origine du plan : Trame lit l'origine du viewBox pour placer les textes, et une
+    // image qui commencerait à la marge décalerait chaque cartouche de 5 mm. La page est un
+    // RECTANGLE dans ce plan — c'est elle qui rogne, pas le dessin.
+    QRectF imageRect;
+    if (artboards.valid)
+    {
+        imageRect = artboards.planRect;
+    }
+    else if (output.format == OExportFormat::Kind::Print)
+    {
+        imageRect = QRectF(0.0, 0.0, output.result.binWidthPx, output.result.usedHeightPx);
+    }
+    else
+    {
+        imageRect = pages.first();
+        for (const QRectF &page : pages)
+        {
+            imageRect = imageRect.united(page);
+        }
+    }
 
     const QString svgPath = dir.filePath(QStringLiteral("generation.svg"));
 
@@ -401,7 +469,7 @@ auto OExportPdf::Write(const OExportOutput &output, const QString &pdfPath,
         QList<OGradedSvg::LayoutObject> payloadDecor = content.decor;
         payloadDecor += content.payloadDecor;
         recipeElement.appendChild(
-            OExportPieces::Of(recipe, output.layers, displayLabels, pattern, payloadDecor));
+            OExportPieces::Of(recipe, doc, output.layers, displayLabels, pattern, payloadDecor));
     }
 
     // ── Le DESSIN, sans la métadonnée ────────────────────────────────────────────────────────────
@@ -421,7 +489,7 @@ auto OExportPdf::Write(const OExportOutput &output, const QString &pdfPath,
                                     QDomElement(), false, overlayData))
     {
         qWarning() << "OExportPdf: the SVG could not be written";
-        return false;
+        return fail(reason("the plan could not be drawn"));
     }
 
     // ── Le PAYLOAD, dans un fichier à part ──────────────────────────────────────────────────────
@@ -476,7 +544,7 @@ auto OExportPdf::Write(const OExportOutput &output, const QString &pdfPath,
                                            layered, recipeElement, false, overlayData))
         {
             qWarning() << "OExportPdf: the payload SVG could not be written";
-            return false;
+            return fail(reason("the payload could not be written"));
         }
     }
 
@@ -504,7 +572,7 @@ auto OExportPdf::Write(const OExportOutput &output, const QString &pdfPath,
         if (!OExportUnderlay::Write(underlayPath, svgPath, *marks, artboards, sheets, framed))
         {
             qWarning() << "OExportPdf: the assembly marks could not be written";
-            return false;
+            return fail(reason("the assembly marks could not be written"));
         }
     }
 
@@ -530,7 +598,7 @@ auto OExportPdf::Write(const OExportOutput &output, const QString &pdfPath,
         if (!OExportCoverPageSvg::Write(coverPath, *cover, coverPage))
         {
             qWarning() << "OExportPdf: the cover page could not be written";
-            return false;
+            return fail(reason("the cover page could not be written"));
         }
     }
 
@@ -580,7 +648,7 @@ auto OExportPdf::Write(const OExportOutput &output, const QString &pdfPath,
                            coverSheet, payloadPath))
     {
         qWarning() << "OExportPdf: the PDF could not be written";
-        return false;
+        return fail(reason("the PDF itself could not be written"));
     }
 
     return true;

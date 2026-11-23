@@ -85,6 +85,54 @@ constexpr auto PointPosition(const QPointF &p, const QLineF &line) -> qreal
 }
 
 //---------------------------------------------------------------------------------------------------------------------
+/// Keep the seam allowance visible when a joint cannot be computed.
+///
+/// A seam allowance of exactly 0 on one side of a node is a step, not an angle: the offset of the wider side
+/// stops at the node, and the contour takes over exactly there. Each joint routine below builds its corner from
+/// an intersection with an edge that starts on the node as soon as that side is 0, so the intersection falls a
+/// hair short of the offset's end, the rollback has nothing to cut, and the offset point is dropped: the contour
+/// then runs straight to the node and the allowance collapses along the whole incoming segment. Keeping the end
+/// of the offset is the step the user asked for. It is only reached when the rollback found nothing to clip, so
+/// a genuine artificial loop is still clipped exactly as before.
+inline auto AppendStepOnZeroSide(QVector<VRawSAPoint> &points, const VSAPoint &p, const QLineF &bigLine1,
+                                 qreal width) -> bool
+{
+    // A step needs contour to step from. When the joint is reached before any point was drawn, the end of the
+    // offset is not the end of anything: it lands beside the node and the contour then joins it, making a spike
+    // sticking out of the piece. Only keep it when the contour has started, or when it falls on the node itself.
+    if (points.isEmpty() && not VFuzzyComparePoints(bigLine1.p2(), p.ToQPointF()))
+    {
+        return false;
+    }
+
+    if (VFuzzyComparePossibleNulls(p.GetSABefore(width), 0) == VFuzzyComparePossibleNulls(p.GetSAAfter(width), 0))
+    {
+        return false; // both sides are alike, there is no step to keep
+    }
+
+    points.append(VRawSAPoint(bigLine1.p2(), p.CurvePoint(), p.TurnPoint()));
+    return true;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/// Same step, built from scratch: used by the joint routines that would otherwise have to invent an intersection
+/// between the offset of the wide side and a side that has none. The narrow side is the contour itself, so the
+/// only honest drawing is the offset up to the node, then the node.
+inline auto BuildZeroSideStep(const QVector<VRawSAPoint> &points, const VSAPoint &p, const QLineF &bigLine1,
+                              const QLineF &bigLine2, qreal width, QVector<VRawSAPoint> &step) -> bool
+{
+    if (VFuzzyComparePossibleNulls(p.GetSABefore(width), 0) == VFuzzyComparePossibleNulls(p.GetSAAfter(width), 0))
+    {
+        return false;
+    }
+
+    step = points;
+    step.append(VRawSAPoint(bigLine1.p2(), p.CurvePoint(), p.TurnPoint()));
+    step.append(VRawSAPoint(bigLine2.p1(), p.CurvePoint(), p.TurnPoint()));
+    return true;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
 auto AngleByLength(QVector<VRawSAPoint> points,
                    QPointF p1,
                    QPointF p2,
@@ -242,6 +290,19 @@ auto AngleByIntersection(const QVector<VRawSAPoint> &points,
                          bool *needRollback = nullptr) -> QVector<VRawSAPoint>
 {
     {
+        QVector<VRawSAPoint> step;
+        // La marche d'un joint à marge nulle ne vaut que pour l'équerrage PAR DÉFAUT : quand un type
+        // est choisi (symétrie, intersection, angle droit), c'est SA construction qui doit sortir — la
+        // marche l'écrasait, d'où un écart de 1 à 10 mm avec la symétrie demandée. Garde et non retour
+        // vide : sans marche, on laisse simplement la routine continuer.
+        if (p.GetAngleType() == PieceNodeAngle::ByLength
+            && BuildZeroSideStep(points, p, bigLine1, bigLine2, width, step))
+        {
+            return step;
+        }
+    }
+
+    {
         QLineF const edge1(p2, p1);
         QLineF const edge2(p2, p3);
 
@@ -288,6 +349,10 @@ auto AngleByIntersection(const QVector<VRawSAPoint> &points,
         if (success)
         {
             pointsIntr = temp;
+        }
+        else
+        {
+            AppendStepOnZeroSide(pointsIntr, p, bigLine1, width);
         }
 
         if (needRollback != nullptr)
@@ -386,6 +451,10 @@ auto AngleByFirstSymmetry(const QVector<VRawSAPoint> &points,
         {
             pointsIntr = temp;
         }
+        else
+        {
+            AppendStepOnZeroSide(pointsIntr, p, bigLine1, width);
+        }
 
         if (needRollback != nullptr)
         {
@@ -421,6 +490,19 @@ auto AngleBySecondSymmetry(const QVector<VRawSAPoint> &points,
                            qreal width,
                            bool *needRollback = nullptr) -> QVector<VRawSAPoint>
 {
+    {
+        QVector<VRawSAPoint> step;
+        // La marche d'un joint à marge nulle ne vaut que pour l'équerrage PAR DÉFAUT : quand un type
+        // est choisi (symétrie, intersection, angle droit), c'est SA construction qui doit sortir — la
+        // marche l'écrasait, d'où un écart de 1 à 10 mm avec la symétrie demandée. Garde et non retour
+        // vide : sans marche, on laisse simplement la routine continuer.
+        if (p.GetAngleType() == PieceNodeAngle::ByLength
+            && BuildZeroSideStep(points, p, bigLine1, bigLine2, width, step))
+        {
+            return step;
+        }
+    }
+
     {
         QLineF const edge1(p2, p1);
         QLineF const edge2(p2, p3);
@@ -473,6 +555,10 @@ auto AngleBySecondSymmetry(const QVector<VRawSAPoint> &points,
         if (success)
         {
             pointsIntr = temp;
+        }
+        else
+        {
+            AppendStepOnZeroSide(pointsIntr, p, bigLine1, width);
         }
 
         if (needRollback != nullptr)
@@ -585,6 +671,19 @@ auto AngleBySecondRightAngle(QVector<VRawSAPoint> points,
                              bool *needRollback = nullptr) -> QVector<VRawSAPoint>
 {
     {
+        QVector<VRawSAPoint> step;
+        // La marche d'un joint à marge nulle ne vaut que pour l'équerrage PAR DÉFAUT : quand un type
+        // est choisi (symétrie, intersection, angle droit), c'est SA construction qui doit sortir — la
+        // marche l'écrasait, d'où un écart de 1 à 10 mm avec la symétrie demandée. Garde et non retour
+        // vide : sans marche, on laisse simplement la routine continuer.
+        if (p.GetAngleType() == PieceNodeAngle::ByLength
+            && BuildZeroSideStep(points, p, bigLine1, bigLine2, width, step))
+        {
+            return step;
+        }
+    }
+
+    {
         QLineF const edge1(p2, p1);
         QLineF const edge2(p2, p3);
 
@@ -648,6 +747,10 @@ auto AngleBySecondRightAngle(QVector<VRawSAPoint> points,
         {
             points = temp;
             px = points.constLast().ToQPointF();
+        }
+        else
+        {
+            AppendStepOnZeroSide(points, p, bigLine1, width);
         }
 
         if (countBefore > 0)
@@ -1524,6 +1627,7 @@ auto VAbstractPiece::Equidistant(QVector<VSAPoint> points, qreal width, const QS
             = EkvPoint(ekvPoints, points.at(i - 1), points.at(i), points.at(i + 1), points.at(i), width);
     }
 
+    const QVector<VRawSAPoint> ekvBeforeRollback = ekvPoints;
     if (needRollback)
     {
         QT_WARNING_PUSH
@@ -1557,6 +1661,18 @@ auto VAbstractPiece::Equidistant(QVector<VSAPoint> points, qreal width, const QS
         }
 
         QT_WARNING_POP
+    }
+
+    // **Un rollback ne peut pas avaler le contour.** Il sert à faire démarrer la marge au cran : il coupe
+    // la fin du tracé à la première rencontre avec la ligne de coupe. Sur un joint à marge nulle, la
+    // marche construite pour ce joint EST sur cette ligne de coupe — la première rencontre tombe donc
+    // tout de suite, et un contour de 262 points ressortait à 4. La pièce perdait alors sa marge
+    // (« La marge de couture est invalide », Parementure devant - Retournée et Thermocollant Par devant
+    // en 34/160 et 42/160) et ses crans avec. Un contour fermé de trois points n'est jamais un contour :
+    // dans ce cas on garde celui d'avant le rollback, qui est valide.
+    if (needRollback && ekvPoints.size() * 2 < ekvBeforeRollback.size())
+    {
+        ekvPoints = ekvBeforeRollback;
     }
 
     QVector<VLayoutPoint> cleaned;
@@ -2358,6 +2474,9 @@ auto VAbstractPiece::PlaceLabelShape(const VLayoutPlaceLabel &label) -> PlaceLab
         case PlaceLabelType::Button:
             return ButtonShape();
         case PlaceLabelType::Circle:
+        case PlaceLabelType::FilledCircle:
+            // The same circle: what makes the disc is not its geometry but whether its inside is painted
+            // (IsFilledPlaceLabel), which the surfaces drawing it decide.
             return CircleShape();
         default:
             return {};

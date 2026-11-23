@@ -32,6 +32,8 @@
 #include <QTextStream>
 #include "dialogeditwrongformula.h"
 
+#include "vwidgets/odialogfit.h"
+
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QCheckBox>
@@ -164,6 +166,15 @@ DialogEditWrongFormula::DialogEditWrongFormula(const VContainer *data, quint32 t
     setWindowFlags(Qt::Window);
 #endif
 
+#if defined(Q_OS_MAC)
+    // Une fenêtre modale-de-fenêtre AVEC un parent devient une « sheet » sur macOS : elle s'accroche sous la
+    // barre de titre de la fenêtre parente, n'a plus de barre à elle, et **ne peut pas être déplacée**
+    // (qcocoawindow.mm:463-470 : `beginSheet` déclenché dès que `modality() == Qt::WindowModal` et qu'un
+    // parent existe). Cet éditeur doit pouvoir être poussé de côté : il est donc modal d'application ici,
+    // ce que `exec()` fait déjà de toute façon côté boucle d'événements.
+    setWindowModality(Qt::ApplicationModal);
+#endif
+
     InitVariables();
     this->formulaBaseHeight = ui->plainTextEditFormula->height();
     ui->plainTextEditFormula->installEventFilter(this);
@@ -185,9 +196,9 @@ DialogEditWrongFormula::DialogEditWrongFormula(const VContainer *data, quint32 t
     connect(ui->plainTextEditFormula, &QPlainTextEdit::textChanged, this,
             [this]() { timerFormula->start(formulaTimerTimeout); });
 
-    // Disable Qt::WaitCursor
+    // Disable WaitCursorShape()
 #ifndef QT_NO_CURSOR
-    if (QGuiApplication::overrideCursor() != nullptr && QGuiApplication::overrideCursor()->shape() == Qt::WaitCursor)
+    if (QGuiApplication::overrideCursor() != nullptr && QGuiApplication::overrideCursor()->shape() == WaitCursorShape())
     {
         restoreCursor = true;
         QGuiApplication::restoreOverrideCursor();
@@ -215,7 +226,7 @@ DialogEditWrongFormula::~DialogEditWrongFormula()
 #ifndef QT_NO_CURSOR
     if (restoreCursor)
     {
-        QGuiApplication::setOverrideCursor(Qt::WaitCursor);
+        QGuiApplication::setOverrideCursor(WaitCursorShape());
     }
 #endif
     delete ui;
@@ -383,7 +394,9 @@ void DialogEditWrongFormula::ValChanged(int row)
     }
     catch (const VExceptionBadId &e)
     {
-        qCritical() << qUtf8Printable(e.ErrorMessage());
+        // Raw diagnostic ("ExceptionBadId: ... id="). The dialog says what it has to say in its own labels; this is
+        // for whoever reads the log.
+        qDebug() << qUtf8Printable(e.ErrorMessage());
     }
 }
 
@@ -694,6 +707,10 @@ void DialogEditWrongFormula::showEvent(QShowEvent *event)
     {
         resize(sz);
     }
+
+    // Centred, whole, and raised if the screen is too short for it: a dialogue that opens under the edge
+    // hides its own buttons, and one that opens "a bit far down" makes the reader hunt for it.
+    ODialogFit::CenterOnScreen(this);
 
     CheckState();
 
@@ -1188,7 +1205,8 @@ void DialogEditWrongFormula::RenameObject()
     // explains would leave the row looking as if nothing had happened.
     if (not QRegularExpression(NameRegExp()).match(suffix).hasMatch())
     {
-        QMessageBox::warning(this, title, tr("The name %1 cannot be used in a formula.").arg(suffix));
+        QMessageBox::warning(this, title,
+                                 tr("The name %1 cannot be used in a formula. Choose another one.").arg(suffix));
         return;
     }
 
@@ -1220,7 +1238,8 @@ void DialogEditWrongFormula::RenameObject()
     {
         if (i.key() != reference && i.value() == suffix)
         {
-            QMessageBox::warning(this, title, tr("The name %1 is already used by another line.").arg(suffix));
+            QMessageBox::warning(this, title,
+                                 tr("The name %1 is already used by another line. Choose another one.").arg(suffix));
             return;
         }
     }

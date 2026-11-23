@@ -80,6 +80,7 @@
 #include "../vmisc/def.h"
 #include "vtheme.h"
 #include "../vmisc/vvalentinasettings.h"
+#include "../vmisc/vcommonsettings.h"
 #include "../vtools/tools/drawTools/toolpoint/toolsinglepoint/vtoolbasepoint.h"
 #include "../vtools/tools/oannotationitem.h"
 #include "../vtools/tools/oinfoblockitem.h"
@@ -1460,6 +1461,62 @@ void MainWindow::InitDocksContain()
             &MainWindow::ExportAllGradedRanges);
     connect(m_dockManager->sizeRangesWidget(), &OWidgetSizeRanges::rangeActivated, this,
             &MainWindow::ActivateGradedRange);
+    // A favorite is keyed by the measurements table it comes from, so it cannot be stored for a range built
+    // on a table that is not in the library. The dock cannot explain that in a status line the user may
+    // never look at: the sentence goes in a dialog, with what to do about it.
+    connect(m_dockManager->sizeRangesWidget(), &OWidgetSizeRanges::favoriteUnavailable, this,
+            [this](const QString &rangeName, const QString &measurementTable)
+            {
+                const QString table = QFileInfo(measurementTable).fileName();
+                const QString library = VAbstractApplication::VApp()->Settings()->GetPathMeasurementLibrary();
+
+                QString explanation;
+                if (table.isEmpty())
+                {
+                    explanation = tr("Ostara does not know which measurements table this size range comes "
+                                     "from, so it cannot record a favorite for it.");
+                }
+                else
+                {
+                    explanation = tr("Its measurements table — %1 — is not in the measurements library.")
+                                      .arg(table);
+                }
+
+                QString const rule = tr("A favorite is stored with the table it comes from: the library is "
+                                        "what lets Ostara find the sizes again.");
+                QString const fix = table.isEmpty()
+                                        ? tr("Load a measurements table, then add the size range to favorites.")
+                                        : (library.isEmpty()
+                                               ? tr("Put %1 in the measurements library folder, or choose a "
+                                                    "size range built on a table that is already there.")
+                                                     .arg(table)
+                                               : tr("Put %1 in the measurements library folder (%2), or choose "
+                                                    "a size range built on a table that is already there.")
+                                                     .arg(table, library));
+
+                QMessageBox box(this);
+                box.setIcon(QMessageBox::Information);
+                box.setWindowTitle(tr("Graded mode"));
+                box.setText(tr("“%1” cannot be added to favorites.").arg(rangeName));
+                box.setInformativeText(explanation + QLatin1Char('\n') + rule + QLatin1Char('\n')
+                                       + fix);
+                box.setStandardButtons(QMessageBox::Ok);
+                box.exec();
+            });
+
+    // A library folder moved. Only the measurements folder changes what the Graded mode reads: the axis,
+    // the favourites and the size styles are all keyed by that table's path. Any other folder would pay a
+    // .omt parse and a scene rebuild for nothing — and the rebuild re-enters the Graded mode, which can
+    // open a dialog, so it must never ride on an unrelated preference.
+    connect(VAbstractApplication::VApp()->Settings(), &VCommonSettings::FolderPathChanged, this,
+            [this](const QString &key, const QString &, const QString &)
+            {
+                if (key != QStringLiteral("paths/measurementLibrary"))
+                {
+                    return;
+                }
+                RefreshGradedAfterTableAxisChange(); // no-op outside Graded mode
+            });
 
     // Size Styles dock → MainWindow (edit dialog + global "Show in canvas" gate).
     connect(m_dockManager->sizeStylesWidget(), &OWidgetSizeStyles::editRequested, this,

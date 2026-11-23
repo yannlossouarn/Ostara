@@ -387,8 +387,9 @@ auto WatermarkWindow::on_actionSaveAs_triggered() -> bool
     {
         qDebug("Failed to lock %s", qUtf8Printable(fileName));
         qDebug("Error type: %d", lock->GetLockError());
-        qCritical("%s", qUtf8Printable(tr("Failed to lock. This file already opened in another window. Expect "
-                                          "collissions when run 2 copies of the program.")));
+        // The save itself went through; only the lock could not be taken. Not a rupture, but worth the log.
+        qWarning("%s", qUtf8Printable(tr("Failed to lock. This file already opened in another window. Expect "
+                                         "collissions when run 2 copies of the program.")));
     }
 
     return result;
@@ -558,6 +559,8 @@ void WatermarkWindow::UpdateWindowTitle()
         // #endif /*Q_OS_WIN32*/
     }
 
+    // GetWatermarkFileName() already ends with the "[*]" placeholder — see its own implementation. Appending
+    // another one here would make Qt collapse the pair into a literal "[*]" that the title bar then displays.
     if (isFileWritable)
     {
         setWindowTitle(GetWatermarkFileName());
@@ -568,28 +571,14 @@ void WatermarkWindow::UpdateWindowTitle()
     }
     setWindowFilePath(m_curFile);
 
-#if defined(Q_OS_MAC)
-    static auto fileIcon = QIcon(QCoreApplication::applicationDirPath() + "/../Resources/Ostara.icns"_L1);
-    QIcon icon;
-    if (not m_curFile.isEmpty())
-    {
-        if (not isWindowModified())
-        {
-            icon = fileIcon;
-        }
-        else
-        {
-            static QIcon darkIcon;
-
-            if (darkIcon.isNull())
-            {
-                darkIcon = QIcon(darkenPixmap(fileIcon.pixmap(16, 16)));
-            }
-            icon = darkIcon;
-        }
-    }
-    setWindowIcon(icon);
-#endif // defined(Q_OS_MAC)
+    // No window icon on macOS — deliberately, and for a reason worth keeping.
+    // A macOS window shows no icon in its title bar: the document marker comes from
+    // `setWindowFilePath` just above, and the modified state from the "[*]" placeholder in the
+    // title. Setting one anyway crosses Qt's Cocoa bridge, which converts the icon through
+    // `QImage::toCGImage()`. On macOS 27.2 that call dies in `CGImageCreate` (SIGTRAP, EXC_BREAKPOINT)
+    // as soon as the icon carries a color space, which the native 1024px variant of `Ostara.icns`
+    // does. Rabnest never sets one on macOS, and our own `main.cpp` already skips the application
+    // icon there: this keeps the rule in one place. See Version120.md §33.
 }
 
 //---------------------------------------------------------------------------------------------------------------------

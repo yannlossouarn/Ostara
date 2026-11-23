@@ -202,10 +202,15 @@ auto BuildThumbnail(quint32 pieceId, const VPiece &piece, const OThumbnailData &
     }
     if (!wording.legend.isEmpty())
     {
+        // The legend sits in the drawing's own coordinates, and the drawing is the MIRRORED one —
+        // `ResolveThumbnailWording` already reflected the values for the same reason. Left alone,
+        // the caption of a mirrored miniature would name a place the piece no longer has.
+        const QPointF legendOffset = data.HasLegendOffset()
+                                         ? tool->DisplayMirror().map(data.LegendOffset())
+                                         : data.LegendOffset();
         const QPointF inBlock =
-            data.HasLegendOffset()
-                ? OThumbnailItem::FittedWordOrigin(contentBounds, block, data.LegendOffset())
-                : OThumbnailItem::DefaultLegendOrigin(wording.legend, block, legendFont);
+            data.HasLegendOffset() ? OThumbnailItem::FittedWordOrigin(contentBounds, block, legendOffset)
+                                   : OThumbnailItem::DefaultLegendOrigin(wording.legend, block, legendFont);
         record.words.append({wording.legend, inBlock, true});
     }
     return record;
@@ -223,7 +228,9 @@ bool WriteSvg(const QString &fileName, const QList<QGraphicsItem *> &pieces,
     QFile file(fileName);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
     {
-        qWarning() << "Can't open file for SVG export" << fileName;
+        // Signed: the caller ignores our return value, so the pane is the only place this reaches her.
+        qWarning() << VAbstractValApplication::warningMessageSignature << "Can't open file for SVG export"
+                   << fileName;
         return false;
     }
 

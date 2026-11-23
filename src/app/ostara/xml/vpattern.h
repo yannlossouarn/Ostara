@@ -215,6 +215,15 @@ private:
 
     bool m_pieceGeometryDirty{true};
 
+    /** @brief LiteParseTree failed and RecoverFromFailedLiteParse is retrying with every block. */
+    bool m_liteParseRetrying{false};
+    /** @brief RecoverFromFailedLiteParse posted an undo, not yet run: a second failure must not undo again. */
+    bool m_liteParseUndoing{false};
+
+    /** @brief Answer a LiteParseTree that failed, so that the user is never left with a disabled window:
+     *  read every block again (after a drag), else undo the change, else — nothing left to try — disable it. */
+    void RecoverFromFailedLiteParse(const Document &parse);
+
     bool m_garbageCollected{false};
     QString m_garbageCollectBackupFilePath{};
 
@@ -235,6 +244,7 @@ private:
     auto ParsePieceAnnotations(const QDomElement &domElement) const -> OAnnotationData;
     auto ParsePieceThumbnail(const QDomElement &domElement) const -> OThumbnailData;
     void ParseDetails(const QDomElement &domElement, const Document &parse);
+    void DropUnbuiltDetails();
     void ParsePieceGroups(const QDomElement &domElement);
     void ParseSizeRanges(const QDomElement &domElement);
     void ParsePointElement(VMainGraphicsScene *scene, QDomElement &domElement, const Document &parse,
@@ -400,6 +410,13 @@ private:
     auto GCStaleUnionTools(const VPatternGraph *graph) -> QSet<vidtype>;
     auto GCRemoveFromModeling(const QSet<vidtype> &candidates) -> QSet<vidtype>;
     void GCUpdateHistory(const QSet<vidtype> &removed);
+
+    /** @brief Pieces the file names and the container could not rebuild.
+     *
+     * Collected by ParseDetailElement and removed by DropUnbuiltDetails once the walk of <details> is over:
+     * taking an element out of the tree inside that walk cuts the sibling chain short, and the pieces written
+     * after it would never be read. */
+    QVector<QDomElement> m_unbuiltDetails;
 };
 
 #endif // VPATTERN_H

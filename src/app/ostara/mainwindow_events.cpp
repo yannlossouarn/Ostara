@@ -30,12 +30,17 @@
  *************************************************************************/
 
 #include "mainwindow.h"
+
+#include <QDateTime>
+#include <QFile>
 #include "ui_mainwindow.h"
 #include "mainwindow_helpers.h"
 #include "mainwindow_graded_helpers.h"
 
 #include "WelcomeScreen.h"
 #include "core/odetailspropertybrowser.h"
+#include "core/ofullscreen.h"
+#include "core/opiececommonpoint.h"
 #include "core/opiecegroupholderitem.h"
 #include "core/vapplication.h"
 #include "core/vtooloptionspropertybrowser.h"
@@ -55,6 +60,8 @@
 #include "../vtools/tools/drawTools/operation/vabstractoperation.h"
 #include "../vtools/tools/nodeDetails/vnodepoint.h"
 #include "../vtools/tools/nodeDetails/onodeplacelabel.h"
+#include "../vpatterndb/vpiece.h"
+#include "../vpatterndb/vpiecenode.h"
 #include "../vtools/tools/vtoolseamallowance.h"
 #include "../vwidgets/vmaingraphicsscene.h"
 
@@ -84,6 +91,54 @@ namespace
 {
 /// How long a close remembered during a run waits before asking again whether a dialog has gone.
 constexpr int kDeferredCloseRetryMs = 50;
+
+//---------------------------------------------------------------------------------------------------------------------
+/**
+ * @brief ContourNodeId the contour node a clicked piece node stands for.
+ *
+ * An internal path copies the point it passes through into a modeling point of its own, so one
+ * construction point carries two handles at the very same place. The internal one is added to the piece
+ * after the contour's, which makes it the one a click reaches — the user aims at the point, the copy
+ * catches the press. Every node-picking workflow works on the contour, so a handle the contour does not
+ * carry is read through its construction source: same point, contour id. Without this the workflows
+ * refuse a point the user sees on the outline, or reset themselves with "wrong piece".
+ *
+ * A node with no contour counterpart keeps its own id: a genuine click elsewhere still answers for
+ * itself, and the workflow's own message stays true.
+ *
+ * @param node clicked piece node.
+ * @return the contour node id, or the node's own id when the contour has no such point.
+ */
+auto ContourNodeId(VNodePoint *node) -> quint32
+{
+    const quint32 nodeId = node->getId();
+
+    QGraphicsItem *owner = node->parentItem();
+    while (owner != nullptr && qgraphicsitem_cast<VToolSeamAllowance *>(owner) == nullptr)
+    {
+        owner = owner->parentItem();
+    }
+    auto *pieceTool = qgraphicsitem_cast<VToolSeamAllowance *>(owner);
+    VContainer *data = pieceTool != nullptr ? pieceTool->getData() : nullptr;
+    if (data == nullptr || data->DataPieces() == nullptr || !data->DataPieces()->contains(pieceTool->getId()))
+    {
+        return nodeId;
+    }
+
+    const VPiece piece = data->GetPiece(pieceTool->getId());
+    const QVector<VPieceNode> nodes = piece.GetPath().GetNodes();
+    for (const VPieceNode &contourNode : nodes)
+    {
+        if (contourNode.GetId() == nodeId)
+        {
+            return nodeId; // the contour's own node: there is nothing to translate
+        }
+    }
+
+    const quint32 contourId = OPieceCommonPoint::PieceNodeWithSource(
+        piece, OPieceCommonPoint::SourceNodeId(nodeId, data), data);
+    return contourId == NULL_ID ? nodeId : contourId;
+}
 } // namespace
 
 using namespace Qt::Literals::StringLiterals;
@@ -193,6 +248,13 @@ void MainWindow::changeEvent(QEvent *event)
         }
     }
 
+    if (event->type() == QEvent::WindowStateChange && m_actionFullScreen != nullptr)
+    {
+        // La case du menu dit l'état réel, y compris quand c'est la fenêtre elle-même qui change
+        // d'état : sous macOS, Échap quitte le plein écran sans passer par l'action.
+        m_actionFullScreen->setChecked(OFullScreen::IsActive(this));
+    }
+
     // remember to call base class implementation
     QMainWindow::changeEvent(event);
 }
@@ -202,6 +264,7 @@ void MainWindow::changeEvent(QEvent *event)
  * @brief closeEvent handle after close window.
  * @param event close event.
  */
+//---------------------------------------------------------------------------------------------------------------------
 void MainWindow::closeEvent(QCloseEvent *event)
 {
     qCDebug(vMainWindow, "Closing main window");
@@ -223,7 +286,14 @@ void MainWindow::closeEvent(QCloseEvent *event)
 
     if (MaybeSave())
     {
+        // **The window leaves before the teardown.** Closing the main window destroys everything it shows — the
+        // scene and its tools, the docks, the tab bars — and doing that while the window is still on screen let
+        // every one of them be repainted away one after another: the drawing seemed to fade out. Hidden first,
+        // the teardown is what it is, an internal matter, and the window disappears in one gesture.
+        hide();
+
         FileClosedCorrect();
+
 
         event->accept();
         QApplication::closeAllWindows();
@@ -479,7 +549,7 @@ void MainWindow::HandleItemClicked(QGraphicsItem *item)
         }
         if (node != nullptr)
         {
-            m_dockManager->detailsWidget()->OnNodeSelected(node->getId());
+            m_dockManager->detailsWidget()->OnNodeSelected(ContourNodeId(node));
             return;
         }
     }
@@ -498,7 +568,7 @@ void MainWindow::HandleItemClicked(QGraphicsItem *item)
         }
         if (node != nullptr)
         {
-            m_dockManager->detailsOptions()->OnNodeSelectedForAlignPoint(node->getId());
+            m_dockManager->detailsOptions()->OnNodeSelectedForAlignPoint(ContourNodeId(node));
             return;
         }
     }
@@ -516,7 +586,7 @@ void MainWindow::HandleItemClicked(QGraphicsItem *item)
         }
         if (node != nullptr)
         {
-            m_dockManager->detailsOptions()->OnNodeSelectedForPassmark(node->getId());
+            m_dockManager->detailsOptions()->OnNodeSelectedForPassmark(ContourNodeId(node));
             return;
         }
 
@@ -547,7 +617,7 @@ void MainWindow::HandleItemClicked(QGraphicsItem *item)
         }
         if (node != nullptr)
         {
-            m_dockManager->detailsOptions()->OnNodeSelectedForFoldLine(node->getId());
+            m_dockManager->detailsOptions()->OnNodeSelectedForFoldLine(ContourNodeId(node));
             return;
         }
     }
@@ -565,7 +635,7 @@ void MainWindow::HandleItemClicked(QGraphicsItem *item)
         }
         if (node != nullptr)
         {
-            m_dockManager->detailsOptions()->OnNodeSelectedForSA(node->getId());
+            m_dockManager->detailsOptions()->OnNodeSelectedForSA(ContourNodeId(node));
             return;
         }
     }
@@ -610,7 +680,7 @@ void MainWindow::HandleItemHovered(QGraphicsItem *item)
         }
     }
 
-    m_dockManager->detailsOptions()->OnNodeHoveredForSA(node != nullptr ? node->getId() : 0);
+    m_dockManager->detailsOptions()->OnNodeHoveredForSA(node != nullptr ? ContourNodeId(node) : 0);
 }
 
 

@@ -579,7 +579,7 @@ auto OToolSpread::Create(OToolSpreadInitData &initData) -> OToolSpread *
 
     patternGraph->AddVertex(initData.id, VNodeType::TOOL, initData.doc->PatternBlockMapper()->GetActiveId());
 
-    const auto varData = initData.data->DataDependencyVariables();
+    const auto varData = initData.doc->DependencyVariables(initData.data);
     for (const auto &rotation : std::as_const(initData.rotations))
     {
         initData.doc->FindFormulaDependencies(rotation.angle, initData.id, varData);
@@ -795,7 +795,8 @@ void OToolSpread::SetDisplayShown(bool show)
         QDomElement const element = doc->FindElementById(m_id, getTagName());
         if (element.isElement())
         {
-            doc->AddItemsToGroup(VAbstractPattern::LayerableObjectsOfTool(element, m_id), doc->GetActiveGroup());
+            doc->AddItemsToGroup(VAbstractPattern::LayerableObjectsOfTool(element, m_id, doc),
+                                 doc->GetActiveGroup());
         }
     }
 }
@@ -866,6 +867,19 @@ void OToolSpread::SaveOptionsAndReparse()
     connect(saveOptions, &SaveToolOptions::NeedFullParsing, doc, &VAbstractPattern::NeedFullParsing,
             Qt::QueuedConnection);
     VAbstractApplication::VApp()->getUndoStack()->push(group);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void OToolSpread::GroupVisibility(quint32 object, bool visible)
+{
+    // The figure is one thing here: a layer names the point the operation stands for, or one part of the figure, and
+    // the tracés follow it — the cap's sides, the pleat's folds, the marks of a slash-and-spread, the two edges of a
+    // flounce. Hiding them one by one would leave the rest of the figure drawn on a hidden layer, which is the
+    // question this override answers. The base class hides the single image a layer names (see its own comment).
+    if (operatedObjects.contains(object))
+    {
+        setVisible(visible);
+    }
 }
 
 //---------------------------------------------------------------------------------------------------------------------

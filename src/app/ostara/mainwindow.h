@@ -116,10 +116,24 @@ class MainWindow final : public MainWindowsNoGUI
     Q_OBJECT // NOLINT
 
 public:
+    /**
+     * @brief The PatternLoadResult enum says what opening a pattern actually did.
+     *
+     * A plain bool conflated two opposite outcomes: a load that failed, and a load handed over to another
+     * process because this window already holds a pattern. The caller treated both alike and fell back to
+     * the Welcome screen — which hid the pattern being edited and left its window with no way back.
+     */
+    enum class PatternLoadResult
+    {
+        Loaded,    ///< The pattern is open in this window.
+        Failed,    ///< Nothing usable was loaded; this window has no pattern to show.
+        Delegated, ///< This window already holds a pattern: another process opens the file.
+    };
+
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
 
-    auto LoadPattern(QString fileName, const QString &customMeasureFile = QString()) -> bool;
+    auto LoadPattern(QString fileName, const QString &customMeasureFile = QString()) -> PatternLoadResult;
 
     /// @brief Give the graded ranges back the state an undo/redo command restored.
     ///
@@ -225,7 +239,6 @@ private slots:
     void ToolBarStyles();
     void ToolboxIconSize();
     void Preferences();
-    void ExportDrawAs(bool checked);
     void ExportDetailsAs(bool checked);
 
     void ArrowTool(bool checked);
@@ -523,6 +536,9 @@ private slots:
      *               count on the document still standing there, and has to freeze the answer now.
      */
     void RefreshThumbnailSnapshots(bool freeze = false);
+
+    /** @brief What the miniatures would draw right now, and the size they are captured at. */
+    auto ThumbnailSnapshotDigest() const -> QString;
     /** @brief Stand the document on a size and rebuild every piece there. */
     void ApplyReferenceSize(qreal baseA, qreal baseB, qreal baseC);
     /** @brief Tell the miniature blocks whether the geometry to show is the live one. */
@@ -543,6 +559,13 @@ private slots:
     void ActionExportRecipe_triggered();
     void ActionNewDraw_triggered();
     void ActionSavePiece_triggered();
+
+    /// @brief Prend l'écran pour la fenêtre, ou le rend — le plein écran que l'application possède.
+    ///
+    /// Ce n'est pas le plein écran du gestionnaire de fenêtres : sous X11 la fenêtre perd son cadre et
+    /// prend la géométrie de l'écran, si bien qu'aucun état n'est confié à personne et qu'une dialogue
+    /// ne peut plus le lui reprendre. Voir `core/ofullscreen.h`.
+    void ActionFullScreen_triggered(bool checked);
     void ActionTable_triggered();
     void ActionFinalMeasurements_triggered();
     void ActionInfoBlock_triggered(int page);
@@ -565,10 +588,24 @@ private:
     /// geometry may come from a larger display: the bottom of the window then lands under the taskbar, and
     /// the only way out is to minimise and restore so that Windows re-lays it out. Sophie, 03-11-2026.
     ///
-    /// Called once, from `showEvent`, on the next event-loop turn: the frame margins (title bar, borders)
-    /// only exist once the window is mapped, and they are part of what has to fit — clamping the client
-    /// area alone still leaves the window over the taskbar by the height of its own title bar.
+    /// Called from `showEvent` on the next event-loop turn — the frame margins (title bar, borders) only
+    /// exist once the window is mapped, and they are part of what has to fit — and again from `ShowEditor`,
+    /// where restoring the docks can grow the window past the screen.
+    ///
+    /// Only what does not fit is changed. The ninth-tenths margin belongs to the size the window carries
+    /// when nothing has chosen one yet, that is the default of `mainwindow.ui`; a geometry restored from the
+    /// preferences, or one the reader gave by dragging, is kept whole as long as it fits the usable area.
+    /// Capping every window undid every resize twice — at start-up, then again when the first pattern was
+    /// opened. Sophie, 09-11-2026.
     void FitMainWindowToScreen();
+
+    /// @brief Whether the window's size has been settled — restored from the preferences, or given by the
+    /// reader.
+    ///
+    /// While it is false the window still carries the default size of `mainwindow.ui`, the only one
+    /// FitMainWindowToScreen() leaves a margin of air around. ReadSettings() sets it when a geometry was
+    /// actually restored; the first fit sets it in every other case.
+    bool m_initialSizeSettled{false};
 
     /** @brief ui keeps information about user interface */
     Ui::MainWindow *ui;
@@ -736,6 +773,14 @@ private:
     QTimer *m_thumbnailSnapshots{nullptr};
     /** @brief Guards the miniature capture against re-entrance: it parses the document twice. */
     bool m_thumbnailSnapshotBusy{false};
+    /** @brief What the miniatures drew at the last pass — what a pass would capture again.
+     *
+     *  A miniature shows the piece's DRAWING: contour, seam allowance, notches, internal paths, fold
+     *  mark. Moving a grainline, an annotation or a cartouche changes none of it, and yet each of
+     *  those edits used to relaunch a pass that parses the whole document twice — measured 1 247 to
+     *  1 466 ms of blocked event loop per committed edit, which the canvas pays as a lag between the
+     *  hand and the item. Same string, same drawings: there is nothing to freeze. */
+    QString m_thumbnailSnapshotDigest{};
     /** @brief Une génération est en cours : les miniatures n'ont rien à y faire.
      *
      *  Le minuteur est réarmé à chaque taille par `GradationChanged`, et l'export ouvre une boucle
@@ -763,6 +808,12 @@ private:
     bool m_pickingClick{false};
 
     QMultiHash<VShortcutAction, QAction *> m_shortcutActions{};
+
+    /// @brief L'entrée « Full screen » du menu Display.
+    ///
+    /// Gardée ici pour que `changeEvent()` puisse lui dire ce qui s'est réellement passé sans passer
+    /// par `ui`, qui n'existe pas encore quand les premiers événements d'état de fenêtre arrivent.
+    QAction *m_actionFullScreen{nullptr};
 
     bool IsNodePickingActive() const;
 
@@ -1159,6 +1210,10 @@ private:
     void WelcomeOpenRecentMeasurement(const QString &path);
     void AddRecentMeasurementAndRefresh(const QString &path);
 
+    // Recent lists (Welcome screen right-click): forget an entry, keep the file
+    void WelcomeRemoveRecentPattern(const QString &path);
+    void WelcomeRemoveRecentMeasurement(const QString &path);
+
     auto LoadMeasurements(const QString &patternPath, QString &path) -> bool;
     auto UpdateMeasurements(const QString &patternPath, QString &path, qreal baseA, qreal baseB, qreal baseC) -> bool;
     auto UpdateMeasurements(const QSharedPointer<VMeasurements> &mFile, qreal baseA, qreal baseB, qreal baseC,
@@ -1248,7 +1303,6 @@ private:
 
     void StoreDimensions();
 
-    void ExportDraw(const QString &fileName);
 
     void NewBackgroundImageItem(const VBackgroundPatternImage &image);
     auto InitBackgroundImageItem(const VBackgroundPatternImage &image) -> VBackgroundImageItem *;

@@ -45,6 +45,21 @@ private slots:
     // Clear must not let pending workers leak edges into the next document's graph
     void ClearCancelsPendingWorkers();
 
+    // A copy no piece replaces is drawn whole: a layer must still be able to name it, or no layer can hide it
+    void CopyStaysLayerableWhileNoPieceIsDrawn();
+    // A copy the canvas replaces with its pieces gives way to them, and to nothing else
+    void CopyGivesWayToThePiecesItDraws();
+    // What the element declares survives the load pass even when the canvas does not draw it
+    void DeclaredPairsSurviveWhileNotDrawn();
+
+    // The versions of the pattern: the entry that cannot be deleted, ids that are never reused, and the
+    // switch that keeps the list it turns off
+    void PatternVersions();
+
+    // Inside a VisibilityIndexScope, IsObjectVisible answers every object exactly as the walk does, and a layer
+    // written during the scope is seen at once. Set OSTARA_VISIBILITY_FILE to a pattern to compare on it too.
+    void VisibilityIndexAnswersLikeTheWalk();
+
 private:
     Q_DISABLE_COPY_MOVE(TST_VAbstractPattern) // NOLINT
 };

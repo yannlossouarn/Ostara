@@ -31,6 +31,7 @@
 #include "vabstractapplication.h"
 
 #include <QDate>
+#include <QPointer>
 
 class VAbstractValApplication; // use in define
 class VAbstractPattern;
@@ -127,6 +128,12 @@ public:
 
     static auto VApp() -> VAbstractValApplication *;
 
+    /** @brief Say something short in the status bar of the main window, without interrupting anything.
+     *
+     * This is what replaces a confirmation box: the reader gets the word, and keeps working. Does nothing when
+     * there is no main window yet (command line, or before the window exists). */
+    static void ShowStatusMessage(const QString &message, int timeoutMs = 5000);
+
 protected:
     QString m_customerName{};
     QDate m_customerBirthDate{};
@@ -157,7 +164,10 @@ protected:
      * @brief mainWindow pointer to main window. Usefull if need create modal dialog. Without pointer to main window
      * modality doesn't work.
      */
-    QWidget *mainWindow{nullptr};
+    /// Un `QPointer` et non un pointeur brut : la fenêtre principale vit avec `Qt::WA_DeleteOnClose`,
+    /// et un filtre d'événements d'application peut encore interroger ce pointeur pendant sa
+    /// destruction. Un pointeur brut y laissait une adresse morte ; celui-ci se met à nul tout seul.
+    QPointer<QWidget> mainWindow{nullptr};
 
     /** @brief mode keep current draw mode. */
     Draw m_mode{Draw::Calculation};

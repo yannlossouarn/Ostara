@@ -93,6 +93,9 @@ struct OPieceGroup : public IPieceInfo
     quint32 alignPointSourceId{NULL_ID}; // Common point source id (NULL_ID = none stored)
     quint32 alignPointMemberId{NULL_ID}; // Member whose copy is the X reference (NULL_ID = lowest piece id)
     bool alignOnPoint{false};            // "Align on the common point": overrides the horizontal alignment
+    // Same common point, other axis. The point is one — chosen when the pieces were linked — but
+    // each axis decides for itself whether it follows it or keeps its anchor.
+    bool alignOnPointV{false};           // Overrides the vertical alignment
 
     // Children — same types as VPiece. No VCustomLabelData: the group holds its fields directly.
     VGrainlineData m_glGrainline{};
@@ -137,6 +140,12 @@ struct OPieceGroup : public IPieceInfo
 
     auto GetFreeText() const -> QString override { return m_freeText; }
     void SetFreeText(const QString &text) override { m_freeText = text; }
+
+    /// A group has no version of its own: it shows the versions of its members, and there is nothing
+    /// here to store — 0 says so, and the setter does nothing. See OPieceInfoWidget, which reads the
+    /// union from the container instead of calling this.
+    auto GetPatternVersion() const -> quint32 override { return 0; }
+    void SetPatternVersion(quint32 /*id*/) override {}
 
     auto GetInfoBlockData() const -> const OInfoBlockData & override { return m_infoBlocks; }
     auto GetInfoBlockData() -> OInfoBlockData & override { return m_infoBlocks; }

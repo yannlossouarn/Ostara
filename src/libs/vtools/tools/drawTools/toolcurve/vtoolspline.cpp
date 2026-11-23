@@ -206,7 +206,7 @@ auto VToolSpline::Create(VToolSplineInitData &initData, const QSharedPointer<VSp
             = QObject::tr("Curve '%1' with id %2 has not unique name.").arg(curveName).arg(initData.id);
         VAbstractApplication::VApp()->IsPedantic()
             ? throw VException(errorMsg)
-            : qWarning() << VAbstractValApplication::warningMessageSignature + errorMsg;
+            : qWarning() << errorMsg; // internal invariant: the log is enough
     }
 
     VPatternGraph *patternGraph = initData.doc->PatternGraph();
@@ -214,7 +214,7 @@ auto VToolSpline::Create(VToolSplineInitData &initData, const QSharedPointer<VSp
 
     patternGraph->AddVertex(initData.id, VNodeType::TOOL, initData.doc->PatternBlockMapper()->GetActiveId());
 
-    const auto varData = initData.data->DataDependencyVariables();
+    const auto varData = initData.doc->DependencyVariables(initData.data);
     initData.doc->FindFormulaDependencies(initData.a1, initData.id, varData);
     initData.doc->FindFormulaDependencies(initData.a2, initData.id, varData);
     initData.doc->FindFormulaDependencies(initData.l1, initData.id, varData);
@@ -650,19 +650,19 @@ void VToolSpline::hoverEnterEvent(QGraphicsSceneHoverEvent *event)
             }
             else
             {
-                setCursor(VAbstractValApplication::VApp()->getSceneView()->viewport()->cursor());
+                unsetCursor(); // no cursor of its own: the view decides, and a copied bitmap would cross into Cocoa
             }
         }
         else
         {
-            setCursor(VAbstractValApplication::VApp()->getSceneView()->viewport()->cursor());
+            unsetCursor(); // no cursor of its own: the view decides, and a copied bitmap would cross into Cocoa
         }
 
         VToolAbstractBezier::hoverEnterEvent(event);
     }
     else
     {
-        setCursor(VAbstractValApplication::VApp()->getSceneView()->viewport()->cursor());
+        unsetCursor(); // no cursor of its own: the view decides, and a copied bitmap would cross into Cocoa
     }
 }
 

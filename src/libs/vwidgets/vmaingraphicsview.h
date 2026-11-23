@@ -185,6 +185,15 @@ public slots:
     /// viewport would be destroyed whenever the viewport is replaced.
     void SetCornerLabel(const QString &text);
 
+    /// @brief Ends any pan gesture and gives the pointer back to the arrow.
+    ///
+    /// A gesture lives in three flags and in the drag mode, and every one of them is cleared by the release
+    /// event that ends it. That event can be lost — a dialog takes it, the scene is rebuilt under the pointer,
+    /// the mode changes — and the closed hand it left behind then belongs to the one view all three modes
+    /// share, so it follows the user everywhere. A mode switch starts a gesture-free canvas; this is what makes
+    /// that true.
+    void ResetPanGesture();
+
     /// @brief ZoomFitBest, framed with @p marginRatio of the content left clear on each side.
     ///
     /// A true fit runs the content against all four edges of the viewport, because the scale
@@ -212,6 +221,16 @@ protected:
 
 private:
     Q_DISABLE_COPY_MOVE(VMainGraphicsView) // NOLINT
+
+    /// @brief The single writer of the viewport cursor while a pan runs.
+    ///
+    /// The view owns no cursor of its own: the pointer is the arrow, and over a drawing item it is
+    /// that item's cursor, which `QGraphicsView` re-applies on every mouse move. A pan is the one
+    /// exception. Its hand cannot be written once at the key press — the item under the mouse writes
+    /// over it on the very next move — so the cursor is decided here, from the flags, after every
+    /// event that may have touched it. With no pan running the arrow comes back.
+    void UpdatePanCursor();
+
     GraphicsViewZoom *zoom{nullptr};
     bool showToolOptions{true};
     bool isAllowRubberBand{true};
@@ -223,12 +242,10 @@ private:
     /// drawing scrolls and zooms. Empty means nothing is drawn.
     QString m_cornerLabel{};
     QPoint m_ptStartPos{};
-    QCursor m_oldCursor{};
     Qt::CursorShape m_currentCursor{Qt::ArrowCursor};
     bool m_isSpacePanActive{false};
     bool m_isSpacePanDrag{false};
     bool m_isMiddlePanActive{false};
-    QCursor m_preSpaceCursor{};
 };
 
 #endif // VMAINGRAPHICSVIEW_H

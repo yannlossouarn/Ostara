@@ -741,13 +741,14 @@ auto AddNodeSplinePath(const VPieceNode &node, const VToolUnionDetailsInitData &
  * @brief AddToNewDetail create united detail adding one node per time.
  */
 void AddNodeToNewPath(const VToolUnionDetailsInitData &initData, VPiecePath &newPath, VPieceNode node,
-                      QVector<quint32> &children, const QString &drawName, qreal dx = 0, qreal dy = 0,
-                      quint32 pRotate = NULL_ID, qreal angle = 0);
+                      QVector<quint32> &children, const QString &drawName, QHash<quint32, quint32> &idMap,
+                      qreal dx = 0, qreal dy = 0, quint32 pRotate = NULL_ID, qreal angle = 0);
 
 void AddNodeToNewPath(const VToolUnionDetailsInitData &initData, VPiecePath &newPath, VPieceNode node,
-                      QVector<quint32> &children, const QString &drawName, qreal dx, qreal dy, quint32 pRotate,
-                      qreal angle)
+                      QVector<quint32> &children, const QString &drawName, QHash<quint32, quint32> &idMap,
+                      qreal dx, qreal dy, quint32 pRotate, qreal angle)
 {
+    const quint32 oldId = node.GetId();
     quint32 id = 0;
     switch (node.GetTypeTool())
     {
@@ -767,12 +768,16 @@ void AddNodeToNewPath(const VToolUnionDetailsInitData &initData, VPiecePath &new
             id = AddNodeSplinePath(node, initData, children, drawName, dx, dy, pRotate, angle);
             break;
         default:
-            qDebug() << "May be wrong tool type!!! Ignoring." << Q_FUNC_INFO;
-            break;
+            // **Ignored means absent.** The node used to be appended anyway with id 0 — a node in the contour
+            // that names nothing, which every reader of the path then has to survive. Types the format no longer
+            // has (the pins of old .val files) go no further than this line.
+            qDebug() << "Unknown node type, left out of the united contour." << Q_FUNC_INFO;
+            return;
     }
 
     node.SetId(id);
     newPath.Append(node);
+    idMap.insert(oldId, id);
 }
 
 //---------------------------------------------------------------------------------------------------------------------
@@ -1176,7 +1181,8 @@ void UpdatePathNode(VContainer *data, const VPieceNode &node, QVector<quint32> &
 
 //---------------------------------------------------------------------------------------------------------------------
 void CreateUnitedNodes(VPiece &newDetail, const VPiece &d1, const VPiece &d2, const QString &drawName,
-                       const VToolUnionDetailsInitData &initData, qreal dx, qreal dy, quint32 pRotate, qreal angle)
+                       const VToolUnionDetailsInitData &initData, qreal dx, qreal dy, quint32 pRotate, qreal angle,
+                       QHash<quint32, quint32> &idMap)
 {
     VPatternGraph *patternGraph = initData.doc->PatternGraph();
     SCASSERT(patternGraph != nullptr)
@@ -1194,25 +1200,50 @@ void CreateUnitedNodes(VPiece &newDetail, const VPiece &d1, const VPiece &d2, co
         patternGraph->AddEdge(d2Path.at(i).GetId(), initData.id);
     }
 
-    const auto unitedPath = VToolUnionDetails::CalcUnitedPath(d1Path, d2Path, initData.indexD2, pRotate);
+    const auto contour = VToolUnionDetails::CalcUnitedPath(d1Path, d2Path, initData.indexD2, pRotate);
 
     QVector<quint32> children;
     VPiecePath newPath;
 
-    for (const auto &[first, second] : unitedPath)
+    for (const auto &[first, second] : contour)
     {
         patternGraph->AddEdge(second.GetId(), initData.id);
         if (first)
         { // first piece
-            AddNodeToNewPath(initData, newPath, second, children, drawName);
+            AddNodeToNewPath(initData, newPath, second, children, drawName, idMap);
         }
         else
         { // second piece
-            AddNodeToNewPath(initData, newPath, second, children, drawName, dx, dy, pRotate, angle);
+            AddNodeToNewPath(initData, newPath, second, children, drawName, idMap, dx, dy, pRotate, angle);
         }
     }
 
+    // **The two points of the second piece are not nameless.** They are gone from the contour, but everything the
+    // file says about them still names them: a custom seam allowance drawn up to one of them, for instance. The
+    // correspondence has to reach the point that took their place, or GetValidRecords drops the record silently.
+    VPieceNode a1;
+    VPieceNode b1;
+    d1Path.NodeOnEdge(initData.indexD1, a1, b1);
+    VPieceNode a2;
+    VPieceNode b2;
+    d2Path.NodeOnEdge(initData.indexD2, a2, b2);
+
+    const auto remapFusionPoint = [&idMap](quint32 gone, quint32 kept) -> void
+    {
+        if (const auto survivor = idMap.constFind(kept); survivor != idMap.cend())
+        {
+            idMap.insert(gone, survivor.value());
+        }
+    };
+    remapFusionPoint(a2.GetId(), b1.GetId()); // the placement laid the start of the second edge on the end of the first
+    remapFusionPoint(b2.GetId(), a1.GetId());
+
     newDetail.SetPath(newPath);
+
+    // **Where each node came from** — filled by AddNodeToNewPath, at the very place a new id is given. A custom
+    // seam allowance names the two contour nodes that bound its segment; those ids belong to the pieces that gave
+    // way, and the united piece has nodes of its own. Without this correspondence every record is silently
+    // dropped by GetValidRecords, and the seam allowance is computed as if the user had never drawn one.
 
     for (auto child : std::as_const(children))
     {
@@ -1240,7 +1271,11 @@ void CreateUnitedDetailCSA(VPiece &newDetail, const VPiece &d, QVector<quint32> 
         for (int i = 0; i < path.CountNodes(); ++i)
         {
             patternGraph->AddEdge(path.at(i).GetId(), initData.id);
-            AddNodeToNewPath(initData, newPath, path.at(i), nodeChildren, drawName, dx, dy, pRotate, angle);
+            // These copies live in a <path> of their own; the correspondence kept for the contour does not
+            // concern them, so they fill a map nobody reads.
+            QHash<quint32, quint32> pathIds;
+            AddNodeToNewPath(initData, newPath, path.at(i), nodeChildren, drawName, pathIds, dx, dy, pRotate,
+                             angle);
         }
         const quint32 idPath = initData.data->AddPiecePath(newPath);
 
@@ -1265,7 +1300,8 @@ void CreateUnitedDetailCSA(VPiece &newDetail, const VPiece &d, QVector<quint32> 
 
 //---------------------------------------------------------------------------------------------------------------------
 void CreateUnitedCSA(VPiece &newDetail, const VPiece &d1, const VPiece &d2, const QString &drawName,
-                     const VToolUnionDetailsInitData &initData, qreal dx, qreal dy, quint32 pRotate, qreal angle)
+                     const VToolUnionDetailsInitData &initData, qreal dx, qreal dy, quint32 pRotate, qreal angle,
+                     const QHash<quint32, quint32> &idMap)
 {
     const QVector<CustomSARecord> records = d1.GetCustomSARecords();
     for (const auto &record : records)
@@ -1276,6 +1312,22 @@ void CreateUnitedCSA(VPiece &newDetail, const VPiece &d1, const VPiece &d2, cons
     QVector<quint32> children;
     CreateUnitedDetailCSA(newDetail, d2, children, drawName, initData, dx, dy, pRotate, angle);
     SaveCSAChildren(initData.doc, initData.id, children);
+
+    // Both sides, now that they are all in place: a record bounds a segment of the contour it was drawn on, and
+    // the contour is the united one. An id the map does not know is left as written — GetValidRecords will do
+    // with it exactly what it does today, and the record was already unusable.
+    for (CustomSARecord &record : newDetail.GetCustomSARecords())
+    {
+        if (const auto it = idMap.constFind(record.startPoint); it != idMap.cend())
+        {
+            record.startPoint = it.value();
+        }
+
+        if (const auto it = idMap.constFind(record.endPoint); it != idMap.cend())
+        {
+            record.endPoint = it.value();
+        }
+    }
 
     VPatternGraph *patternGraph = initData.doc->PatternGraph();
     SCASSERT(patternGraph != nullptr)
@@ -1305,7 +1357,11 @@ void CreateUnitedDetailInternalPaths(VPiece &newDetail, const VPiece &d, QVector
         for (int i = 0; i < path.CountNodes(); ++i)
         {
             patternGraph->AddEdge(path.at(i).GetId(), initData.id);
-            AddNodeToNewPath(initData, newPath, path.at(i), nodeChildren, drawName, dx, dy, pRotate, angle);
+            // These copies live in a <path> of their own; the correspondence kept for the contour does not
+            // concern them, so they fill a map nobody reads.
+            QHash<quint32, quint32> pathIds;
+            AddNodeToNewPath(initData, newPath, path.at(i), nodeChildren, drawName, pathIds, dx, dy, pRotate,
+                             angle);
         }
         const quint32 idPath = initData.data->AddPiecePath(newPath);
 
@@ -1432,11 +1488,24 @@ void UpdateUnitedNodes(const VToolUnionDetailsInitData &initData, qreal dx, qrea
     // This check needed for backward compatibility
     // Remove check and "else" part if min version is 0.3.2
     Q_STATIC_ASSERT_X(VPatternConverter::PatternMinVer < FormatVersion(0, 3, 2), "Time to refactor the code.");
-    if (children.size() == countNodeD1 + countNodeD2 - 1)
-    {
-        const auto unitedPath = VToolUnionDetails::CalcUnitedPath(d1REPath, d2REPath, initData.indexD2, pRotate);
+    // A contour written before the four points became two holds one child more: the point of the second piece that
+    // sits at the end of its own seam edge. Which of the two sequences this file was written with, its children say.
+    const auto contour = VToolUnionDetails::CalcUnitedPath(d1REPath, d2REPath, initData.indexD2, pRotate);
+    const auto beforeFusion = VToolUnionDetails::CalcUnitedPath(d1REPath, d2REPath, initData.indexD2, pRotate, false);
 
-        for (const auto &[first, second] : unitedPath)
+    const QVector<QPair<bool, VPieceNode>> *sequence = nullptr;
+    if (children.size() == contour.size())
+    {
+        sequence = &contour;
+    }
+    else if (children.size() == beforeFusion.size())
+    {
+        sequence = &beforeFusion;
+    }
+
+    if (sequence != nullptr)
+    {
+        for (const auto &[first, second] : *sequence)
         {
             patternGraph->AddEdge(second.GetId(), initData.id);
             if (first)
@@ -1638,6 +1707,16 @@ void UpdateUnitedDetailPlaceLabels(const VToolUnionDetailsInitData &initData, qr
 }
 
 //---------------------------------------------------------------------------------------------------------------------
+/** @brief The name a united piece carries: where it comes from.
+ *
+ *  Every union used to be called "United detail" — the same name, translated, in every file: nothing to tell
+ *  two of them apart in the pieces dock, and nothing to say which pieces gave way for it. */
+auto UnitedName(const VPiece &d1, const VPiece &d2) -> QString
+{
+    return QStringLiteral("%1 + %2").arg(d1.GetName(), d2.GetName());
+}
+
+//---------------------------------------------------------------------------------------------------------------------
 void CreateUnitedDetail(const VToolUnionDetailsInitData &initData, qreal dx, qreal dy, quint32 pRotate, qreal angle)
 {
     const QString drawName = DrawName(initData.doc, initData.d1id, initData.d2id);
@@ -1646,19 +1725,36 @@ void CreateUnitedDetail(const VToolUnionDetailsInitData &initData, qreal dx, qre
     const VPiece d1 = initData.data->GetPiece(initData.d1id);
     const VPiece d2 = initData.data->GetPiece(initData.d2id);
 
-    VPiece newDetail;
+    // **A united piece is piece 1 with another contour.** Everything that describes the piece rather than its
+    // outline comes from d1: whether it carries a seam allowance, the grain line, the cut quantities, the
+    // options, the free text, the cartouche, the annotations. Starting from an empty VPiece dropped all of it,
+    // so the user had to switch the seam allowance back on after every union — and watch it be computed on a
+    // contour whose corner was wrong (see CalcUnitedPath).
+    VPiece newDetail = d1;
 
-    CreateUnitedNodes(newDetail, d1, d2, drawName, initData, dx, dy, pRotate, angle);
-    CreateUnitedCSA(newDetail, d1, d2, drawName, initData, dx, dy, pRotate, angle);
+    // The lists the helpers below fill: they append, and what d1 carries names d1's nodes, which the union
+    // does not reuse. Same for the data that names a node instead of describing the piece.
+    newDetail.SetCustomSARecords({});
+    newDetail.SetInternalPaths({});
+    newDetail.SetPlaceLabels({});
+    newDetail.SetSAMarginGroupNodeIds({});
+    newDetail.SetSAMarginGroupNames({});
+    newDetail.SetSAMarginGroupColorIndices({});
+    newDetail.SetSAMarginGroupShowStates({});
+    newDetail.SetMirrorLineStartPoint(NULL_ID);
+    newDetail.SetMirrorLineEndPoint(NULL_ID);
+    newDetail.SetGradedAlignPointId(NULL_ID);
+
+    QHash<quint32, quint32> idMap; // node of a source piece -> node of the united contour
+    CreateUnitedNodes(newDetail, d1, d2, drawName, initData, dx, dy, pRotate, angle, idMap);
+    CreateUnitedCSA(newDetail, d1, d2, drawName, initData, dx, dy, pRotate, angle, idMap);
     CreateUnitedInternalPaths(newDetail, d1, d2, drawName, initData, dx, dy, pRotate, angle);
     CreateUnitedPlaceLabels(newDetail, d1, d2, drawName, initData, dx, dy, pRotate, angle);
 
-    newDetail.SetName(QObject::tr("United detail"));
-    QString const formulaSAWidth = d1.GetFormulaSAWidth();
-    newDetail.SetFormulaSAWidth(formulaSAWidth, d1.GetSAWidth());
-    newDetail.SetMx(d1.GetMx());
-    newDetail.SetMy(d1.GetMy());
+    newDetail.SetName(UnitedName(d1, d2));
     newDetail.SetUnited(true);
+
+    QString const formulaSAWidth = newDetail.GetFormulaSAWidth();
 
     VToolSeamAllowanceInitData pieceInitData;
     pieceInitData.detail = newDetail;
@@ -1679,42 +1775,21 @@ void CreateUnitedDetail(const VToolUnionDetailsInitData &initData, qreal dx, qre
         patternGraph->AddEdge(initData.id, pieceInitData.id);
     }
 
-    auto DuplicateDetail = [&initData](quint32 id) -> void
+    // **The pieces the union was made from leave only when the user did not ask to keep them.** They used to
+    // be duplicated first and deleted anyway, so "Retain original pieces" kept copies and destroyed the
+    // originals — the very objects the union's <det> blocks name. Kept, they are kept as they are.
+    if (not initData.retainPieces)
     {
-        VToolSeamAllowanceInitData initPieceData;
-        initPieceData.scene = initData.scene;
-        initPieceData.doc = initData.doc;
-        initPieceData.parse = Document::FullParse;
-        initPieceData.typeCreation = Source::FromGui;
-        initPieceData.drawName = initData.doc->PieceDrawName(id);
-
-        VContainer toolData = VAbstractPattern::getTool(id)->GetDataCopy();
-        initPieceData.data = &toolData;
-
-        initPieceData.detail = initData.data->GetPiece(id);
-        initPieceData.width = initPieceData.detail.GetFormulaSAWidth();
-
-        if (VToolSeamAllowance *duplicate = VToolSeamAllowance::Duplicate(initPieceData))
+        auto RemoveDetail = [](quint32 id) -> void
         {
-            duplicate->RefreshGeometry(true); // Refresh internal paths
-        }
-    };
+            auto *toolDet = qobject_cast<VToolSeamAllowance *>(VAbstractPattern::getTool(id));
+            SCASSERT(toolDet != nullptr);
+            toolDet->RemoveWithConfirm(false);
+        };
 
-    if (initData.retainPieces)
-    {
-        DuplicateDetail(initData.d1id);
-        DuplicateDetail(initData.d2id);
+        RemoveDetail(initData.d1id);
+        RemoveDetail(initData.d2id);
     }
-
-    auto RemoveDetail = [](quint32 id) -> void
-    {
-        auto *toolDet = qobject_cast<VToolSeamAllowance *>(VAbstractPattern::getTool(id));
-        SCASSERT(toolDet != nullptr);
-        toolDet->RemoveWithConfirm(false);
-    };
-
-    RemoveDetail(initData.d1id);
-    RemoveDetail(initData.d2id);
 }
 
 //---------------------------------------------------------------------------------------------------------------------
@@ -1729,7 +1804,7 @@ void UpdateUnitedDetail(const VToolUnionDetailsInitData &initData, qreal dx, qre
 
 //---------------------------------------------------------------------------------------------------------------------
 void UniteDetails(const VToolUnionDetailsInitData &initData)
-{
+{ // kept in the anonymous namespace: the details live here
     VPieceNode det1p1;
     qreal dx = 0;
     qreal dy = 0;
@@ -1750,12 +1825,23 @@ void UniteDetails(const VToolUnionDetailsInitData &initData)
             const VPiecePath d2Path = GetPiece2MainPath(initData.doc, initData.id);
             UnionInitParameters(initData, d1Path, d2Path, det1p1, dx, dy, angle);
             UpdateUnitedDetail(initData, dx, dy, det1p1.GetId(), angle);
+
+            // Written down on purpose: this is the only place that says a union was actually replayed. The graded
+            // scene reparses the whole pattern once per size, so a log with one line per size is the proof that
+            // the united piece follows the sizes instead of staying on the geometry it was built with.
+            qCDebug(vToolUnion, "Union %u replayed: %lld nodes.", initData.id,
+                    static_cast<long long>(d1Path.CountNodes() + d2Path.CountNodes()));
         }
-        catch (const VExceptionBadId &)
+        catch (const VExceptionBadId &e)
         {
             // There is a chance that the tool depends on an already deleted object. We can skip updating in this case.
             // We still can get error in child in case we should not get an error here. Debug will be a little bit
             // obscured. But if this happened something really bad happened.
+            //
+            // Named now, because this is the silence that let a united piece keep nodes nothing answered for: the
+            // pattern opened on a piece that could never be recomputed, and nothing said so.
+            qCDebug(vToolUnion, "Union %u cannot be replayed and was skipped: %s", initData.id,
+                    qUtf8Printable(e.ErrorMessage()));
         }
     }
 }
@@ -1932,7 +2018,7 @@ void VToolUnionDetails::AddToModeling(const QDomElement &domElement)
     }
     else
     {
-        qCCritical(vToolUnion, "Can't find tag %s.", qUtf8Printable(VAbstractPattern::TagModeling));
+        qCDebug(vToolUnion, "Can't find tag %s.", qUtf8Printable(VAbstractPattern::TagModeling));
     }
 }
 
@@ -2027,18 +2113,40 @@ auto VToolUnionDetails::ReferenceObjects(const QDomElement &root, const QString 
 }
 
 //---------------------------------------------------------------------------------------------------------------------
+void VToolUnionDetails::Replay(const VToolUnionDetailsInitData &initData)
+{
+    UniteDetails(initData);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
 auto VToolUnionDetails::CalcUnitedPath(const VPiecePath &d1Path, const VPiecePath &d2Path, quint32 indexD2,
-                                       quint32 pRotate) -> QVector<QPair<bool, VPieceNode>>
+                                       quint32 pRotate, bool fuseFusionPoints)
+    -> QVector<QPair<bool, VPieceNode>>
 {
     QVector<QPair<bool, VPieceNode>> path;
 
     const vsizetype countNodeD1 = d1Path.CountNodes();
     const vsizetype countNodeD2 = d2Path.CountNodes();
 
+    // **Four points make two.** The two edges the user picked are the seam: they are in neither outline, and their
+    // four ends become two points. The placement of UnionInitParameters lays the second edge on the first one in
+    // reverse — the end of the second edge on the start of the first one — so the pairs are (a1, b2) and (b1, a2).
+    // What the contour keeps is the two points of the FIRST piece: a point belongs to a piece, and it is its name
+    // that the user reads. The two points of the second piece give what they carried instead of a place: the width
+    // of the segment that arrives at one end, of the segment that leaves at the other. Their passmarks go with
+    // them — a notch on a seam that is no longer there marks nothing.
+    VPieceNode a2;
+    VPieceNode b2;
+    d2Path.NodeOnEdge(indexD2, a2, b2);
+
+    // The nodes of the second piece that enter the contour: everything but the two ends of its seam edge.
+    const vsizetype blockSize = fuseFusionPoints ? countNodeD2 - 2 : countNodeD2 - 1;
+
     qint32 pointsD2 = 0; // Keeps number points the second detail, that we have already added.
     qint32 i = 0;
     const int det1P1Index = d1Path.indexOfNode(pRotate);
     bool checkUniqueness = false;
+    bool waitForFusionEnd = false; // the next node of the first piece is b1: it takes over from a2
     do
     {
         VPieceNode node = d1Path.at(i);
@@ -2048,10 +2156,25 @@ auto VToolUnionDetails::CalcUnitedPath(const VPiecePath &d1Path, const VPiecePat
             node.SetCheckUniqueness(false);
             checkUniqueness = false;
         }
+        if (waitForFusionEnd)
+        {
+            node.SetFormulaSABefore(a2.GetFormulaSABefore()); // the segment that arrives comes from the second piece
+            node.SetPassmark(false);
+            waitForFusionEnd = false;
+        }
         path.append(qMakePair(true, node));
         ++i;
-        if (i > det1P1Index && pointsD2 < countNodeD2 - 1)
+        if (i > det1P1Index && blockSize > 0 && pointsD2 < blockSize)
         {
+            if (fuseFusionPoints)
+            {
+                // a1 has just been laid down: the segment that leaves it is the first one of the second piece.
+                VPieceNode &a1 = path.last().second;
+                a1.SetFormulaSAAfter(b2.GetFormulaSAAfter());
+                a1.SetPassmark(false);
+                waitForFusionEnd = true;
+            }
+
             qint32 j = 0;
             FindIndexJ(pointsD2, d2Path, indexD2, j);
             do
@@ -2063,10 +2186,19 @@ auto VToolUnionDetails::CalcUnitedPath(const VPiecePath &d1Path, const VPiecePat
                 path.append(qMakePair(false, d2Path.at(j)));
                 ++pointsD2;
                 ++j;
-            } while (pointsD2 < countNodeD2 - 1);
+            } while (pointsD2 < blockSize);
             checkUniqueness = true;
         }
     } while (i < countNodeD1);
+
+    // The seam can be the closing edge of the first piece: then the node that follows a1 is the first one of the
+    // contour, and that is where the second piece ends.
+    if (waitForFusionEnd && not path.isEmpty())
+    {
+        VPieceNode &b1 = path.first().second;
+        b1.SetFormulaSABefore(a2.GetFormulaSABefore());
+        b1.SetPassmark(false);
+    }
 
     return path;
 }

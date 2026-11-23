@@ -155,6 +155,16 @@ struct VIncrementGroupData
     bool collapsed{false};
 };
 
+/// A version (variant) of the pattern: a name, and the pieces that wear it. The first entry is the
+/// "all versions" one — every piece belongs to it until it is given another version, it may be
+/// renamed, and it can never be deleted. A piece references its version by id, so renaming one moves
+/// nothing; deleting one is refused while pieces still wear it.
+struct VPatternVersionData
+{
+    quint32 id{0};
+    QString name{};
+};
+
 QT_WARNING_POP
 
 QT_WARNING_PUSH
@@ -278,6 +288,38 @@ public:
      *         block. The template is referenced by name and resolved at render. */
     auto GetCartoucheTemplate() const -> QString;
     void SetCartoucheTemplate(const QString &name);
+
+    // ── Versions of the pattern (variants) ───────────────────────────────
+
+    /** @brief Whether the pattern declares several versions. Off by default — a pattern that never
+     *  turned it on carries no `<patternVersions>` element at all. */
+    auto IsMultiVersion() const -> bool;
+    void SetMultiVersion(bool on);
+
+    /** @brief The versions the pattern declares, in file order. Empty when the pattern declares
+     *  none; the "all versions" entry is created when the mode is first turned on. */
+    auto GetPatternVersions() const -> QVector<VPatternVersionData>;
+
+    /** @brief The version @p id designates. An id the document does not know — a deleted version,
+     *  or a file edited by hand — reads as the "all versions" entry, never as nothing. */
+    auto GetPatternVersion(quint32 id) const -> VPatternVersionData;
+
+    /** @brief The id of the "all versions" entry, the first one. 1 when the pattern has no list. */
+    auto AllVersionsId() const -> quint32;
+
+    /** @brief The name of the "all versions" entry when the pattern has no list — what the combos
+     *  show while the mode is off. Translated: it is a name shown to the reader, stored only once
+     *  the list exists. */
+    static auto AllVersionsName() -> QString;
+
+    /** @brief Adds a version named @p name and returns its id. Ids are never reused, so a piece
+     *  that comes back after an undo finds the same version. */
+    auto AddPatternVersion(const QString &name) -> quint32;
+    bool RenamePatternVersion(quint32 id, const QString &name);
+
+    /** @brief Removes the version @p id. Refuses the "all versions" entry — it is where the pieces
+     *  that belong to no particular version live. */
+    bool RemovePatternVersion(quint32 id);
 
     auto GetCompanyName() const -> QString;
 
@@ -411,8 +453,29 @@ public:
      *  Read rather than remembered: a pass only ever describes the block it is given, and a tool refreshed after
      *  it by another block's pass would be answered with the wrong piece's layers — measured, a layer saved hidden
      *  came back drawn until it was toggled by hand. A tool whose tracés join objects that are not its own needs
-     *  this answer (see VToolLinePoint::ApplySegmentsVisibility). */
+     *  this answer (see VToolLinePoint::ApplySegmentsVisibility).
+     *
+     *  Inside a VisibilityIndexScope the same answer is read from one index of the WHOLE document — every block,
+     *  never one piece's pass — built at the first question and thrown away as soon as a layer is written through
+     *  this class, and when the scope ends. */
     auto IsObjectVisible(quint32 objectId) const -> bool;
+
+    /** @brief While alive, IsObjectVisible answers from an index of the layers instead of walking them again.
+     *
+     *  Each question walked every layer item of every block, twice per tracé of every "point on line" tool, on
+     *  every reparse: 40 % of adding a point or dragging a piece on a 900-object pattern (profiled 13-11-2026). A
+     *  reparse asks the same document hundreds of times; the index is valid for exactly that long. Scopes nest. */
+    class VisibilityIndexScope
+    {
+    public:
+        explicit VisibilityIndexScope(const VAbstractPattern *doc);
+        ~VisibilityIndexScope();
+        VisibilityIndexScope(const VisibilityIndexScope &) = delete;
+        auto operator=(const VisibilityIndexScope &) -> VisibilityIndexScope & = delete;
+
+    private:
+        const VAbstractPattern *m_doc;
+    };
 
     /// The sentinel a "which group?" answer carries when the group named does not exist yet: the dialogs ask for a
     /// new group with it, and the code that writes it creates one. A real id never reaches it — the ids come from
@@ -512,8 +575,29 @@ public:
     /// element of its own for them; an operation hides the objects its `<destination>` declares, never its
     /// `<source>`. Pieces, unions and nodes answer to nothing at all and are deliberately left out, rather than
     /// parked in a layer that could never hide them.
-    static auto LayerableObjectsOfTool(const QDomElement &toolElement, quint32 toolId)
-        -> QVector<QPair<quint32, quint32>>;
+    /// @param doc the pattern, for the one question the element cannot answer alone: a cut's halves are layerable
+    ///        only when that cut draws them, and whether it does is written on the cut's own element. Pass NULL only
+    ///        when no element can be looked up — the pieces a copy draws are then counted by their kind alone.
+    /// @param drawnOnly false asks the OTHER question, the one the loading pass needs: every pair the element
+    ///        DECLARES, drawn or not. A layer written by an older build may name a copy that is now drawn by its
+    ///        pieces, or a cut's half that the cut no longer shows; such a pair designates something real, and
+    ///        judging it by what the canvas draws deleted it from the file in silence, which is how a curve ends up
+    ///        belonging to no layer at all. Only a pair the element does not declare at all is stale.
+    static auto LayerableObjectsOfTool(const QDomElement &toolElement, quint32 toolId,
+                                       VAbstractPattern *doc = nullptr,
+                                       bool drawnOnly = true) -> QVector<QPair<quint32, quint32>>;
+
+    /// The pieces of a copy the canvas actually DRAWS, as its `pieceIds` names them.
+    ///
+    /// An operation's copy of a cut curve is replaced on the canvas by the pieces it was split into, and those
+    /// pieces are what a layer must hold — not the copy, which is then never drawn. Every piece is an object of
+    /// the pattern, but not every one is drawn: a run between two nodes always is, a cut's half only when that
+    /// cut shows its two segments (`showTwoSegments`), the rest of the time the cut replaces nothing and the whole
+    /// curve stays on the canvas.
+    ///
+    /// @param item the `<item>` of the operation's `<destination>` that carries the copy
+    /// @param doc the pattern, to read the cut that names a half — NULL counts the halves as not drawn
+    static auto DrawnPieceIds(const QDomElement &item, VAbstractPattern *doc) -> QVector<quint32>;
 
     /// Whether a `<point>` element is one of the three cut tools.
     ///
@@ -589,6 +673,8 @@ public:
     static const QString TagCollection;
     static const QString TagFabricInfo;
     static const QString TagCartouche;
+    static const QString TagPatternVersions;
+    static const QString TagPatternVersion;
     static const QString TagWatermark;
     static const QString TagFinalMeasurements;
     static const QString TagMaterial;
@@ -698,6 +784,12 @@ public:
 
     void FindFormulaDependencies(const QString &formula, quint32 id, const QHash<QString, QList<quint32>> &variables);
 
+    /** @brief The variables FindFormulaDependencies reads, from @a data — or nothing when the graph is not being
+     *  rebuilt, since FindFormulaDependencies then reads none of them. Building the table walks every variable of
+     *  the pattern and is done once per tool: on a drag or a size of the graded range, where the graph is frozen,
+     *  it was half the time of the whole reparse (profiled 13-11-2026), for a table thrown away unread. */
+    auto DependencyVariables(const VContainer *data) const -> QHash<QString, QList<quint32>>;
+
     auto IsPatternGraphComplete() const -> bool;
 
     auto PatternBlockMapper() const -> VPatternBlockMapper *;
@@ -803,6 +895,17 @@ private:
 
     VPatternBlockMapper *m_patternBlockMapper;
 
+    /// The answers of IsObjectVisible inside a VisibilityIndexScope: object → shown by one of the layers holding it.
+    /// An object absent from it is held by no layer, hence shown.
+    mutable QHash<quint32, bool> m_visibilityIndex{};
+    mutable bool m_visibilityIndexBuilt{false};
+    /// A layer item that cannot be read makes every answer "shown", as the walk does (see IsObjectVisible).
+    mutable bool m_visibilityIndexUnreadable{false};
+    mutable int m_visibilityIndexScopes{0};
+
+    void BuildVisibilityIndex() const;
+    void InvalidateVisibilityIndex() const;
+
     QList<QFutureWatcher<void> *> m_formulaDependenciesWatchers{};
     mutable QMutex m_watchersMutex{};
     std::atomic<quint64> m_dependencyCheckGeneration{0};
@@ -854,6 +957,10 @@ private:
 
     auto GetPatternVariable(const QString &attribute) const -> QString;
     void SePatternVariable(const QString &attribute, const QString &name);
+
+    /// The `<patternVersions>` element **as the document holds it**, creating nothing.
+    auto ExistingPatternVersions() const -> QDomElement;
+    auto PatternVersionElement(quint32 id) const -> QDomElement;
 };
 
 QT_WARNING_POP

@@ -128,6 +128,15 @@ struct OExportNestingResult
 {
     bool ok{false};
 
+    /// @brief La hauteur de la feuille sur laquelle le plan a été posé, en PIXELS.
+    ///
+    /// **Un résultat, et non une entrée.** Un format dont la feuille peut se poser dans les deux sens
+    /// (A0) reçoit son sens de la requête (`OExportNestingParams::landscapeSheet`) : le plan est
+    /// nidifié DANS ce sens-là, et c'est cette hauteur-là — avec `binWidthPx` — que la grille, le
+    /// canevas et le PDF lisent ensuite. Zéro sur tout run qui n'a pas eu de feuille : les lecteurs
+    /// prennent alors la hauteur de la requête.
+    double sheetHeightPx{0.0};
+
     /// @brief The run was given up at the caller's request, and what it holds means nothing.
     ///
     /// **Not a failure, and never reported as one.** The user asked for the nesting to stop, and a
@@ -195,6 +204,17 @@ struct OExportNestingParams
     /// qu'elle pose : le projecteur est un plan de tissu sans être un plan de coupe.
     bool grainlinePinned{false};
 
+    /// @brief Whether the run prints on paper rather than laying pieces out on cloth.
+    ///
+    /// **It answers one question: whose edges the refusal is about.** A plan that does not fit
+    /// mentions the space kept from an edge, and that edge is the cloth's on a cutting plan and the
+    /// paper's — a page or a roll — on a print run. Saying "the fabric's edges" to someone printing
+    /// an A0 roll is a sentence about a material that is not in play.
+    ///
+    /// Nothing else reads it: the engine has no idea what it is laying pieces out on, and must not
+    /// learn. This only names the thing the user is looking at.
+    bool printRun{false};
+
     /// @brief « Sens unique » — aucune pièce n'est retournée d'un demi-tour.
     ///
     /// Retire un **sens**, pas un axe : une pièce « Double » garde le droit-fil ET le contre-fil.
@@ -218,6 +238,38 @@ struct OExportNestingParams
     // pass on, and nothing else does.
     int    artboardCount{0};   ///< frames side by side across the bin width
     double artboardHeightPx{0.0}; ///< frame height, converted to pixels like the rest
+
+    /// @brief Whether the sheet may be laid either way — the A0 sheet alone.
+    ///
+    /// True for the one format with no column to multiply. What it no longer means is « le run
+    /// décide » : c'est l'utilisatrice qui décide, par `landscapeSheet`, et le plan est nidifié dans
+    /// CE sens-là et pas dans l'autre. Voir OExportNestingResult::sheetHeightPx.
+    bool sheetBothWays{false};
+
+    /// @brief Le sens dans lequel le plan doit être NIDIFIÉ, quand la feuille en admet deux.
+    ///
+    /// ⚠️ **Le sens décide la nidification, pas la page.** Il a d'abord été question de tourner le
+    /// plan gagnant d'un quart de tour : un plan 841 × 4 756 devient alors une bande de 4 756 × 841,
+    /// donc des feuilles CÔTE À CÔTE — et c'est la seule chose qu'un tour puisse donner. Des feuilles
+    /// empILÉES, comme en portrait, veulent dire un plan nidifié en 1 189 de large : deux mises en
+    /// page différentes, et c'est celle-ci que Sophie a demandée le 07-11-2026.
+    ///
+    /// Conséquence assumée : le sens n'est plus arbitré par le nombre de pages. Un patron qui tenait
+    /// en une feuille en paysage peut en coûter deux en portrait — c'est le prix d'une liasse
+    /// homogène, et la barre de statut dit le compte avant l'impression.
+    bool landscapeSheet{false};
+
+    /// @brief Whether the sheets are CLOSED — no piece may straddle two of them.
+    ///
+    /// False on every format that is assembled: a tiled run is cut, and a piece crossing a cut
+    /// line is printed on both sheets and glued. The A0 sheet is not assembled — a machine folds
+    /// each of its sheets into four A4s — so a piece lying on two of them could not be printed at
+    /// all, and the nesting has to keep every piece whole inside one.
+    ///
+    /// Two consequences, both here and not in the engine: `TiledEngine::Spec::closedSheets` is
+    /// what forbids the straddle, and the strip plan stops competing — it knows no sheet, so
+    /// nothing stops it from laying a piece across one. See RunExportNesting.
+    bool closedSheets{false};
 
     /// The block the cover page reserves, in PIXELS from the bin's own top-left corner — empty
     /// when the run carries no cover page, or when its format gives the page a sheet of its own.

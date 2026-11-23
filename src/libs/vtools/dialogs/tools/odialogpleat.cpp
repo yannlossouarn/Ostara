@@ -45,6 +45,7 @@
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QTabBar>
+#include <QScreen>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 
@@ -201,6 +202,12 @@ ODialogPleat::ODialogPleat(const VContainer *data, VAbstractPattern *doc, quint3
     EnableDetails(false);
     RefreshCapLabels();
     RefreshFoldLineState();
+
+    // The pages used to be wrapped here, and the frame capped, when the content asked for more height
+    // than a small screen gives it. Both are now done once for every dialog by ODialogFit, installed
+    // with the application: a tab widget directly in the frame is what it scrolls, and the bar of
+    // buttons stays outside the area, where it can still be clicked.
+
 }
 
 //---------------------------------------------------------------------------------------------------------------------

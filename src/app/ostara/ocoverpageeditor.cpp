@@ -26,6 +26,8 @@
 
 #include "ocoverpageeditor.h"
 
+#include "core/osavednotification.h"
+
 #include "core/ocovergradedaxis.h"
 #include "core/ocoverpagecatalogue.h"
 #include "core/ocoverpagetemplatestorage.h"
@@ -346,7 +348,14 @@ QWidget *OCoverPageEditor::MakeTopBar()
     layout->addStretch(1);
 
     m_saveButton = new QPushButton();
-    connect(m_saveButton, &QPushButton::clicked, this, &OCoverPageEditor::SaveTemplate);
+    // The button answers its own click. The save itself stays silent so that the window's single
+    // Save - which writes both families, cover page included - says « saved » once and not twice.
+    connect(m_saveButton, &QPushButton::clicked, this, [this]() {
+        if (SaveTemplate())
+        {
+            OSavedNotification::Template(this);
+        }
+    });
     layout->addWidget(m_saveButton);
 
     return bar;
@@ -621,8 +630,8 @@ auto OCoverPageEditor::DiscardUnsavedChanges() -> bool
     {
         // The file that held the saved state cannot be read: there is nothing to go back to, so
         // nothing is thrown away. The document keeps its flag and the close prompt will speak again.
-        QMessageBox::warning(this, tr("Discard changes"),
-                             tr("The saved template could not be read back, so the changes were kept.\n\n%1")
+        QMessageBox::warning(this, tr("Changes kept"),
+                             tr("The saved template could not be read back, so your changes were kept.\n\n%1")
                                  .arg(error));
         return false;
     }
@@ -646,7 +655,7 @@ auto OCoverPageEditor::Template() const -> OCoverPageTemplate
 
 //---------------------------------------------------------------------------------------------------------------------
 
-void OCoverPageEditor::SaveTemplate()
+auto OCoverPageEditor::SaveTemplate() -> bool
 {
     const QString name = m_nameEdit->text().trimmed();
     if (name.isEmpty())
@@ -654,7 +663,7 @@ void OCoverPageEditor::SaveTemplate()
         QMessageBox::warning(this, tr("Save template"),
                              tr("Give the template a name before saving it."));
         m_nameEdit->setFocus();
-        return;
+        return false;
     }
 
     // Where the file goes, what becomes of the name it had, what happens when that name is taken:
@@ -672,12 +681,13 @@ void OCoverPageEditor::SaveTemplate()
                                  tr("A template called \"%1\" already exists.\n\nChoose another name.")
                                      .arg(result.name));
             m_nameEdit->setFocus();
-            return;
+            return false;
 
         case OCoverPageTemplateStorage::SaveOutcome::Failed:
             QMessageBox::critical(this, tr("Save template"),
-                                  tr("Could not save the template.\n\n%1").arg(result.error));
-            return;
+                                  tr("Ostara could not save the template.\n\n%1\n\nCheck that the folder allows writing, "
+                                     "and that the file is not open in another program.").arg(result.error));
+            return false;
 
         case OCoverPageTemplateStorage::SaveOutcome::Saved:
             break;
@@ -697,6 +707,7 @@ void OCoverPageEditor::SaveTemplate()
     // Last, and only on a save that happened: every path above that bailed out has returned
     // already, so this says the file on disk is now what the editor shows.
     emit TemplateSaved();
+    return true;
 }
 
 //---------------------------------------------------------------------------------------------------------------------
@@ -716,7 +727,8 @@ void OCoverPageEditor::LoadTemplate(const QString &filePath)
     if (!OCoverPageTemplateStorage::Load(filePath, &tpl, &error))
     {
         QMessageBox::critical(this, tr("Open template"),
-                              tr("Could not open the template.\n\n%1").arg(error));
+                              tr("Ostara could not open the template.\n\n%1\n\nThe file may have been moved, "
+                                 "renamed, or written by a newer version of Ostara.").arg(error));
         return;
     }
 

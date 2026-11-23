@@ -388,6 +388,9 @@ enum class Layout : ToolVisHolderType
 {
     GrainlineItem = static_cast<ToolVisHolderType>(Vis::LAST_ONE_DO_NOT_USE),
     FoldLineItem,
+    /// A mark whose ink fills it — an internal-mark disc. It is an item of its own because the filling is
+    /// decided at paint time from the pen, not stored: see VGraphicsFilledMarkItem.
+    FilledMarkItem,
     LAST_ONE_DO_NOT_USE // add new stuffs above this, this constant must be last and never used
 };
 
@@ -395,7 +398,7 @@ enum class Layout : ToolVisHolderType
 // one before it. A value added anywhere above therefore moves every value below, without a word. These two say
 // the totals out loud, the way the Q_STATIC_ASSERT on Tool::LAST_ONE_DO_NOT_USE does for the tools.
 Q_STATIC_ASSERT_X(static_cast<int>(Vis::LAST_ONE_DO_NOT_USE) == 152, "List of Vis items changed.");
-Q_STATIC_ASSERT_X(static_cast<int>(Layout::LAST_ONE_DO_NOT_USE) == 154, "List of Layout items changed.");
+Q_STATIC_ASSERT_X(static_cast<int>(Layout::LAST_ONE_DO_NOT_USE) == 155, "List of Layout items changed.");
 
 enum class VarType : qint8
 {
@@ -569,6 +572,34 @@ void MacosEnableLayerBacking();
 const int userMaterialPlaceholdersQuantity = 20;
 
 auto QPixmapFromCache(const QString &pixmapPath) -> QPixmap;
+
+/**
+ * @brief The cursor an item shows under the pointer — the hand, as the platform can wear it.
+ *
+ * **On macOS the two hands are the system cursors, not bitmaps.** A bitmap cursor is an image passed to
+ * CoreGraphics, and macOS 27.2 traps on the colour space Qt hands it (SIGTRAP in `CGImageCreate`,
+ * Version120.md §33). Any other artwork keeps its look but leaves without a colour space.
+ */
+auto HandCursor(const QString &pixmapPath, int hotX = -1, int hotY = -1) -> QCursor;
+
+/**
+ * @brief The "you can move this" cursor, as the platform can wear it.
+ *
+ * **macOS 27.2 traps on `Qt::SizeAllCursor`.** Measured on the build machine with a six-line probe: the
+ * shape exits 133 (SIGTRAP) while SizeVer, SizeHor, SizeFDiag, SizeBDiag, SplitV/H, PointingHand and the
+ * hands pass — it is one of the two shapes Qt draws as its own image, and that image traps in
+ * `CGImageCreate` on the colour space Qt hands CoreGraphics (Version120.md §33). The hand is what the pan
+ * and the pieces already wear for the same gesture, so the canvas speaks one language.
+ */
+auto MoveCursorShape() -> Qt::CursorShape;
+
+/**
+ * @brief The wait cursor, as the platform can wear it.
+ *
+ * Same measurement, same machine: `Qt::WaitCursor` is the other shape that exits 133, and
+ * `Qt::BusyCursor` passes. A file that takes a second to open is not worth a process.
+ */
+auto WaitCursorShape() -> Qt::CursorShape;
 void SetItemOverrideCursor(QGraphicsItem *item, const QString &pixmapPath, int hotX = -1, int hotY = -1);
 
 //---------------------------------------------------------------------------------------------------------------------

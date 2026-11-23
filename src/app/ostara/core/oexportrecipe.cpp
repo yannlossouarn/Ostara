@@ -29,6 +29,8 @@
 #include "oexportoutput.h"
 #include "oexporttemplate.h"
 
+#include "../dialogs/oexportprintmodel.h"
+
 #include <QDomDocument>
 #include <QDomNamedNodeMap>
 #include <QList>
@@ -62,7 +64,19 @@ constexpr auto kAttrColumns = "columns";
 constexpr auto kAttrMarginMm = "marginMm";
 constexpr auto kAttrGapMm = "gapMm";
 constexpr auto kAttrFrameHeightMm = "frameHeightMm";
+constexpr auto kAttrDecor = "decor";
+/// Le sens du DOCUMENT demandé — « landscape » quand il n'est pas le portrait. Absent : portrait.
+constexpr auto kAttrOrientation = "orientation";
+/// La forme de page cherchée par le format Projecteur — « portrait » ou « landscape ». Absent :
+/// carré, qui est le défaut. Ce n'est PAS `orientation` : un projecteur n'a pas de feuille à tourner,
+/// il a une largeur à chercher.
+constexpr auto kAttrShape = "shape";
 constexpr auto kAttrDocumentWidthMm = "documentWidthMm";
+/// La longueur maximale d'une page de rouleau, quand elle a été choisie. Absente : 500 cm (le
+/// plafond du PDF). Écrite pour que le portage Rabnest la rejoue, même s'il ne la lit pas encore.
+constexpr auto kAttrMaxPageLengthMm = "maxPageLengthMm";
+/// L'export hors marges droite/gauche, quand il est demandé. Absente : non.
+constexpr auto kAttrTrimSideMargins = "trimSideMargins";
 constexpr auto kAttrTemplate = "template";
 
 void WriteElement(QXmlStreamWriter &writer, const QDomElement &element)
@@ -128,6 +142,53 @@ auto OExportRecipe::Of(QDomDocument &doc, const OExportOutput &output, const OEx
     format.setAttribute(QLatin1String(kAttrGapMm), QString::number(output.gapMm));
     format.setAttribute(QLatin1String(kAttrFrameHeightMm), QString::number(output.frameHeightMm));
     format.setAttribute(QLatin1String(kAttrDocumentWidthMm), QString::number(output.documentWidthMm));
+
+    if (output.maxPageLengthMm > 0.0)
+    {
+        format.setAttribute(QLatin1String(kAttrMaxPageLengthMm), QString::number(output.maxPageLengthMm));
+    }
+    if (output.trimSideMargins)
+    {
+        format.setAttribute(QLatin1String(kAttrTrimSideMargins), true);
+    }
+
+    // ── Le DÉCOR, quand il n'y en a pas ───────────────────────────────────────────────────────────
+    //
+    // Absent veut dire « la génération en porte un », et c'est ce que tout PDF écrit avant cette
+    // attribute signifie — aucun d'eux n'a besoin d'être relu autrement. Mais un format peut
+    // maintenant avoir des feuilles SANS décor (l'A0 : des feuilles entières qu'une machine plie,
+    // rien à assembler), et le fichier ne le disait pas : le lecteur y substituait son propre décor
+    // par défaut. Écrit seulement quand il n'y en a pas, comme `destination` l'a été : une attribute
+    // de plus, aucun changement de version.
+    const OExportPrintModel *formatModel = FindPrintModel(output.printModelToken);
+    if (formatModel != nullptr && !formatModel->hasDecor)
+    {
+        format.setAttribute(QLatin1String(kAttrDecor), false);
+    }
+
+    // ── Le SENS DU DOCUMENT, quand il n'est pas le portrait ──────────────────────────────────────
+    //
+    // Absent veut dire portrait, et c'est ce que TOUTE génération écrite avant cette attribute est
+    // déjà : aucun fichier existant n'a besoin d'être relu autrement. Écrit seulement pour un format
+    // qui admet les deux sens — un A4 n'a pas de sens à demander, et l'écrire là ferait croire à un
+    // choix qui n'existe pas.
+    if (formatModel != nullptr && formatModel->hasOrientation && output.documentLandscape)
+    {
+        format.setAttribute(QLatin1String(kAttrOrientation), QStringLiteral("landscape"));
+    }
+
+    // ── La FORME DE PAGE du projecteur, quand ce n'est pas le carré ─────────────────────────────
+    //
+    // Le projecteur n'a pas de feuille, donc pas d'`orientation` : `shape` est l'autre question —
+    // dans quel sens sa recherche de largeur a été menée. Absent veut dire carré, qui est le défaut,
+    // et un lecteur qui ne connaît pas cette attribute l'ignore : elle est optionnelle.
+    if (OExportFormat::IsProjector(output.format) && output.pageShape != OExportPageShape::Square)
+    {
+        format.setAttribute(QLatin1String(kAttrShape),
+                            output.pageShape == OExportPageShape::Portrait ? QStringLiteral("portrait")
+                                                                           : QStringLiteral("landscape"));
+    }
+
     recipe.appendChild(format);
 
     // The decor, in the template's own words: its three blocks are copied verbatim out of the very

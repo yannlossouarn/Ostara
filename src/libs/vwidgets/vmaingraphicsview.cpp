@@ -88,6 +88,8 @@
 
 namespace
 {
+Q_LOGGING_CATEGORY(vGraphicsView, "v.graphicsview") // NOLINT
+
 // Scrolling tuning, once the Scrolling preferences tab was removed: these were its spin boxes' defaults, and a
 // number that cannot be changed anywhere does not need to be a setting.
 constexpr int kScrollingDuration = 300;
@@ -96,6 +98,42 @@ constexpr qreal kSensorMouseScale = 2.0;
 constexpr qreal kWheelMouseScale = 45.0;
 constexpr qreal kScrollingAcceleration = 1.3;
 
+/// Whether a cursor shows a hand — the standard shapes, and the two bitmaps the drawing items set.
+auto IsHandCursor(const QCursor &cursor) -> bool
+{
+    switch (cursor.shape())
+    {
+        case Qt::OpenHandCursor:
+        case Qt::ClosedHandCursor:
+            return true;
+        case Qt::BitmapCursor:
+            if (const QPixmap pixmap = cursor.pixmap(); not pixmap.isNull())
+            {
+                const qint64 key = pixmap.cacheKey();
+                return key == QPixmapFromCache(cursorArrowOpenHand).cacheKey()
+                       || key == QPixmapFromCache(cursorArrowCloseHand).cacheKey();
+            }
+            return false;
+        default:
+            return false;
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/// Whether the item under the pointer, or one of its parents, asks for a hand of its own.
+auto ItemWantsHand(const QGraphicsItem *item) -> bool
+{
+    for (const QGraphicsItem *current = item; current != nullptr; current = current->parentItem())
+    {
+        if (current->hasCursor() && IsHandCursor(current->cursor()))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
 auto ScrollingSteps(QWheelEvent *wheel_event) -> qreal
 {
     SCASSERT(wheel_event != nullptr)
@@ -668,12 +706,11 @@ void VMainGraphicsView::mousePressEvent(QMouseEvent *event)
     if (m_isSpacePanActive && event->button() == Qt::LeftButton)
     {
         m_ptStartPos = event->pos();
-        m_oldCursor = viewport()->cursor();
         QGraphicsView::setDragMode(QGraphicsView::ScrollHandDrag);
         m_isSpacePanDrag = true;
         panStarted = true;
         event->accept();
-        viewport()->setCursor(Qt::ClosedHandCursor);
+        UpdatePanCursor();
 
         // ⚠️ **Aucun appel à `QGraphicsView::mousePressEvent` ici, et c'est la correction.** Ce
         // handler de base livre TOUJOURS la pression à la scène avant de regarder le mode de
@@ -731,12 +768,11 @@ void VMainGraphicsView::mousePressEvent(QMouseEvent *event)
             if (list.isEmpty() || (scene && scene->IsNonInteractive()))
             { // Only when the user clicks on the scene background or non interactive scene
                 m_ptStartPos = event->pos();
-                m_oldCursor = viewport()->cursor();
                 QGraphicsView::setDragMode(QGraphicsView::ScrollHandDrag);
                 m_isMiddlePanActive = true;
                 panStarted = true;
                 event->accept();
-                viewport()->setCursor(Qt::ClosedHandCursor);
+                UpdatePanCursor();
             }
             break;
         }
@@ -756,6 +792,20 @@ void VMainGraphicsView::mousePressEvent(QMouseEvent *event)
 //---------------------------------------------------------------------------------------------------------------------
 void VMainGraphicsView::mouseMoveEvent(QMouseEvent *event)
 {
+    // ⚠️ **A pan ends with the button, not with the event that says so.** The release that closes a pan can be
+    // lost: a dialog takes it, the scene is rebuilt under the pointer, the mode changes while the button is down.
+    // The flags would then stay set and keep a closed hand on the one view all three modes share — in Details, in
+    // Graded and in Draw. The buttons this move carries are the truth, so the flags follow them.
+    const Qt::MouseButtons buttons = event->buttons();
+    if ((m_isSpacePanDrag && not buttons.testFlag(Qt::LeftButton))
+        || (m_isMiddlePanActive && not buttons.testFlag(Qt::MiddleButton)))
+    {
+        qCDebug(vGraphicsView, "Pan: the button was released somewhere this view never heard about; gesture closed.");
+        m_isSpacePanDrag = false;
+        m_isMiddlePanActive = false;
+        QGraphicsView::setDragMode(QGraphicsView::NoDrag);
+    }
+
     emit itemHovered(itemAt(event->pos()));
 
     // Hack to fix problem with mouse cursor. Looks like after we switch cursor back it is rewrited back by a dialog.
@@ -801,6 +851,24 @@ void VMainGraphicsView::mouseMoveEvent(QMouseEvent *event)
     {
         QGraphicsView::mouseMoveEvent(event);
     }
+
+    // ⚠️ **Le pan reprend le curseur en dernier.** `QGraphicsView` réécrit le curseur du viewport à
+    // chaque déplacement avec celui de l'item sous la souris (`_q_setViewportCursor`) : la main posée
+    // au clavier disparaissait donc sous le curseur d'une miniature, et une main fermée prise sur un
+    // item pouvait au contraire survivre au pan. La décision revient à `UpdatePanCursor()`, après coup.
+    if (m_isSpacePanActive || m_isSpacePanDrag || m_isMiddlePanActive)
+    {
+        UpdatePanCursor();
+    }
+    else if (IsHandCursor(viewport()->cursor()) && not ItemWantsHand(itemAt(event->pos())))
+    {
+        // **A hand nothing stands behind is left over.** No pan runs and nothing under the pointer asks for a
+        // hand: whoever set this one is gone — an item destroyed in the middle of its own gesture (a scene
+        // rebuilt while a miniature was being dragged), or a release nobody delivered. The pointer is the
+        // arrow, and it stays the arrow until something asks for more.
+        qCDebug(vGraphicsView, "Cursor: a hand no gesture and no item stands behind; the arrow is back.");
+        viewport()->setCursor(Qt::ArrowCursor);
+    }
 }
 
 //---------------------------------------------------------------------------------------------------------------------
@@ -832,24 +900,26 @@ void VMainGraphicsView::mouseReleaseEvent(QMouseEvent *event)
         QGraphicsView::mouseReleaseEvent(event); // First because need to hide a rubber band
     }
     QGraphicsView::setDragMode(QGraphicsView::NoDrag);
-    if (event->button() == Qt::MiddleButton)
+
+    if (wasMiddlePan)
     {
-        viewport()->setCursor(m_oldCursor);
-        if (wasMiddlePan)
-        {
-            m_isMiddlePanActive = false;
-        }
+        m_isMiddlePanActive = false;
     }
+
     if (wasSpacePanDrag)
     {
+        // The press the pan had retained is closed here. Whether the hand stays on is the flags'
+        // business, and `UpdatePanCursor()` decides it — no cursor is set from a snapshot any more.
         m_isSpacePanDrag = false;
-        // Open hand only while the key is still held: if Espace went up first, the key release has
-        // already put the real cursor back, and setting the hand here would leave it for good.
-        viewport()->setCursor(m_isSpacePanActive ? Qt::OpenHandCursor : m_preSpaceCursor);
     }
     else if (event->button() == Qt::LeftButton)
     {
         emit MouseRelease();
+    }
+
+    if (wasSpacePanDrag || wasMiddlePan || m_isSpacePanActive || m_isMiddlePanActive)
+    {
+        UpdatePanCursor();
     }
 }
 
@@ -862,9 +932,8 @@ void VMainGraphicsView::keyPressEvent(QKeyEvent *event)
 {
     if (event->key() == Qt::Key_Space && not event->isAutoRepeat())
     {
-        m_preSpaceCursor = viewport()->cursor();
-        viewport()->setCursor(Qt::OpenHandCursor);
         m_isSpacePanActive = true;
+        UpdatePanCursor();
         event->accept();
         return;
     }
@@ -892,7 +961,7 @@ void VMainGraphicsView::keyReleaseEvent(QKeyEvent *event)
             // pression avait été retenue, livrait un `release` sans `press` à la scène, et laissait
             // la main fermée quand Espace partait avant le bouton.
         }
-        viewport()->setCursor(m_preSpaceCursor);
+        UpdatePanCursor();
         event->accept();
         return;
     }
@@ -907,14 +976,59 @@ void VMainGraphicsView::focusOutEvent(QFocusEvent *event)
     // Reset it here to avoid a permanent global hand cursor.
     if (m_isSpacePanActive || m_isSpacePanDrag || m_isMiddlePanActive)
     {
-        const bool wasMiddlePan = m_isMiddlePanActive;
         m_isSpacePanActive = false;
         m_isSpacePanDrag = false;
         m_isMiddlePanActive = false;
         QGraphicsView::setDragMode(QGraphicsView::NoDrag);
-        viewport()->setCursor(wasMiddlePan ? m_oldCursor : m_preSpaceCursor);
+        UpdatePanCursor();
     }
     QGraphicsView::focusOutEvent(event);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void VMainGraphicsView::ResetPanGesture()
+{
+    if (m_isSpacePanActive || m_isSpacePanDrag || m_isMiddlePanActive
+        || dragMode() == QGraphicsView::ScrollHandDrag)
+    {
+        qCDebug(vGraphicsView, "Pan: gesture dropped at a scene change.");
+        m_isSpacePanActive = false;
+        m_isSpacePanDrag = false;
+        m_isMiddlePanActive = false;
+        QGraphicsView::setDragMode(QGraphicsView::NoDrag);
+    }
+    // The new mode starts on the arrow: an item of the scene that is going away cannot keep the pointer.
+    viewport()->setCursor(Qt::ArrowCursor);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/**
+ * @brief the single writer of the viewport cursor while a pan runs.
+ *
+ * The view owns no cursor of its own: the pointer is the arrow, and over a drawing item it is that
+ * item's cursor, which `QGraphicsView` re-applies on every mouse move. A pan is the one exception,
+ * and it cannot write its hand once and for all at the key press — the item under the mouse writes
+ * over it on the very next move. The hand is therefore decided here, from the flags, after every
+ * event that may have touched the cursor. With no pan running the arrow comes back, so neither a
+ * hand nor an item cursor can outlive the gesture.
+ */
+void VMainGraphicsView::UpdatePanCursor()
+{
+    QCursor cursor(Qt::ArrowCursor);
+    if (m_isSpacePanDrag || m_isMiddlePanActive)
+    {
+        cursor = QCursor(Qt::ClosedHandCursor);
+    }
+    else if (m_isSpacePanActive)
+    {
+        cursor = QCursor(Qt::OpenHandCursor);
+    }
+
+    if (viewport()->cursor() == cursor)
+    {
+        return; // the same cursor again is not free: the platform cursor is reprogrammed each time
+    }
+    viewport()->setCursor(cursor);
 }
 
 //---------------------------------------------------------------------------------------------------------------------

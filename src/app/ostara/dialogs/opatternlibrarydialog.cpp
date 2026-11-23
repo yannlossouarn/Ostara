@@ -490,11 +490,19 @@ void OPatternLibraryDialog::ShowDetails()
         m_fabricLabel->clear();
 
         // Which of the three empty states it is: the difference between a window that answers and a window that
-        // looks broken.
+        // looks broken. A fourth state exists — the folder is gone, which used to read as "holds no pattern"
+        // and made a moved library look emptied (Ostara recreates its folders empty at startup).
         if (m_entries.isEmpty())
         {
-            m_stateLabel->setText(searching ? tr("No pattern matches the search.")
-                                            : tr("This folder holds no pattern."));
+            if (not QDir(m_directory).exists())
+            {
+                m_stateLabel->setText(tr("This folder does not exist. Check its path in Settings."));
+            }
+            else
+            {
+                m_stateLabel->setText(searching ? tr("No pattern matches the search.")
+                                                : tr("This folder holds no pattern."));
+            }
         }
         else
         {
@@ -671,6 +679,8 @@ void OPatternLibraryDialog::ExportEntry(int row)
         return;
     }
 
+    // The window is modal: a status line on the main window would be hidden behind it, so the word goes in the
+    // dialog's own state label — the same one that already says when the list is empty or filtered.
     QMessageBox::information(this, tr("Export successful"), tr("Pattern exported to:\n%1").arg(target));
 }
 

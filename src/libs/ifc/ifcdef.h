@@ -65,11 +65,19 @@ extern const QString AttrGradedAlignV;
 /// On a group: the construction source id (idObject) of the common point, which is the only
 /// identity the members' copies share.
 extern const QString AttrGradedAlignPoint;
+extern const QString AttrGradedAlignPointV;
 /// Group only: the member whose copy of the common point is the X reference.
 extern const QString AttrGradedAlignPointMember;
 /// Group only: whether the horizontal alignment is overridden by the common point.
 extern const QString AttrGradedAlignOnPoint;
+extern const QString AttrGradedAlignOnPointV;
 extern const QString AttrPieceNumber;
+/// A stable key, never a pattern object id: the document checks that every `id` is unique, and a
+/// version is not an object of the pattern — `key` keeps it out of that namespace.
+extern const QString AttrKey;
+/// The pattern version a piece belongs to, by id into `<patternVersions>`. Absent = the
+/// "all versions" entry, which is what every piece of a single-version pattern is.
+extern const QString AttrPatternVersion;
 extern const QString AttrCutFabricQty;
 extern const QString AttrCutFabricOnFold;
 extern const QString AttrCutInterfacingQty;
@@ -223,6 +231,9 @@ extern const QString AttrCurveName2;
 extern const QString AttrSegment1Id;
 extern const QString AttrSegment2Id;
 extern const QString AttrShowTwoSegments;
+extern const QString AttrCutNodes;
+extern const QString AttrSegmentAtCarrure;
+extern const QString AttrPortionIds;
 extern const QString AttrSegment3Id;
 extern const QString AttrSegment4Id;
 extern const QString AttrSegment1Mx;

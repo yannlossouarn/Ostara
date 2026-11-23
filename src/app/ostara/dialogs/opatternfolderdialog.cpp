@@ -25,6 +25,7 @@
  *************************************************************************/
 
 #include "opatternfolderdialog.h"
+#include "../../../libs/vmisc/vabstractvalapplication.h"
 
 #include "core/opatternlibrary.h"
 #include "widgets/InfoBlock/OPieceCartoucheStorage.h"
@@ -253,6 +254,8 @@ void OPatternFolderDialog::OnAccept()
                                     QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
         if (answer != QMessageBox::Yes)
         {
+            // The window is modal, on top of another modal one: a status line on the main window would be hidden
+            // behind both, so the sentence stays in a box.
             QMessageBox::information(this, tr("New folder"),
                                      tr("Rename the folder or the client, so that the two can be told apart."));
             m_nameEdit->setFocus();

@@ -83,6 +83,11 @@ signals:
     void deleteRequested(const QString &rangeName);
     void exportRequested(const QString &rangeName);
     void exportAllRequested(const QString &dirPath);
+
+    /// The star was clicked on a range whose measurements table is not in the library: no favorite can be
+    /// stored for it, because a favorite is keyed by the table it comes from. The widget owns no dialog — the
+    /// window explains the refusal and what to do about it.
+    void favoriteUnavailable(const QString &rangeName, const QString &measurementTable);
     void rangeActivated(const QString &rangeName);
 
 protected:

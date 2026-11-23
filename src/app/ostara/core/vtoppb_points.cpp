@@ -541,6 +541,9 @@ auto LineProperties() -> std::vector<PropertyDesc>
     return {
         MakeStringPropWithValidator<VToolLine>(QStringLiteral("lineRoleName"), T(QT_TRANSLATE_NOOP("VToolOptionsPropertyBrowser", "Line:")),
         &VToolLine::GetLineRoleName, &VToolLine::SetLineRoleName),
+        // A line keeps nothing of its own: its length is the distance between its two points, read at every
+        // refresh. Read only, so the row is a label and not a field (see MakeReadOnlyLength).
+        MakeReadOnlyLength<VToolLine>(AttrLength, T(QT_TRANSLATE_NOOP("VToolOptionsPropertyBrowser", "Length:"))),
         MakeLineType<VToolLine>(T(QT_TRANSLATE_NOOP("VToolOptionsPropertyBrowser", "Line type:"))),
         MakeLineColor<VToolLine>(T(QT_TRANSLATE_NOOP("VToolOptionsPropertyBrowser", "Line color:"))),
         MakeNotes<VToolLine>(T(QT_TRANSLATE_NOOP("VToolOptionsPropertyBrowser", "Notes:"))),

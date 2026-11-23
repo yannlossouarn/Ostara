@@ -34,12 +34,14 @@
 
 #include <QHash>
 #include "core/vapplication.h"
+#include "macwindowtheme.h"
 #include "mainwindow.h"
 #include "widgets/InfoBlock/OInfoBlockResolver.h"
 #include "widgets/InfoBlock/OPieceCartoucheStorage.h"
 #include "core/oexporttemplatestorage.h"
 #include "core/opiecelibrary.h"
 #include "core/opatternlibrary.h"
+#include "core/oupdatecheck.h"
 #include "core/othumbnailtextbuilder.h"
 #include "core/ofoldlinelabelbuilder.h"
 
@@ -223,6 +225,16 @@ auto main(int argc, char *argv[]) -> int
 
         mw->show();
 
+        // L'annonce d'une nouvelle version, une fois la fenêtre à l'écran : elle lit un fichier d'une
+        // ligne sur le site et se tait si elle n'y arrive pas. Différée d'un tour de boucle pour que
+        // le premier dessin passe avant — une boîte collée à `show()` retarderait l'ouverture.
+        QTimer::singleShot(0, mw, [mw] { OUpdateCheck::Check(mw); });
+
+        // The main window closes without the window server's snapshot animation: that animation is played from an
+        // image of the window taken after it stopped drawing, and on this application it reads as a blurred fade
+        // (see macwindowtheme.h). Done once, on the window that carries the editor.
+        DisableWindowCloseAnimation(mw->winId());
+
         // Process command-line args (crash restore, file opens)
         QTimer::singleShot(0, mw, &MainWindow::ProcessCMD);
     }
@@ -235,6 +247,7 @@ auto main(int argc, char *argv[]) -> int
     }
 
     const int returnCode = VApplication::exec();
+
 
     if (not VApplication::IsGUIMode())
     {

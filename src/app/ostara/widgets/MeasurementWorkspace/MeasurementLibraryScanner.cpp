@@ -27,6 +27,7 @@
 #include "MeasurementLibraryScanner.h"
 #include "xml/oomtdocument.h"
 #include "omeasurementtypes.h"
+#include "core/olibrarystorage.h"
 #include "ifc/exception/vexceptionobjecterror.h"
 
 #include <QDir>
@@ -122,21 +123,13 @@ auto IsInLibrary(const QString &libPath, const QString &canonicalPath) -> bool
         return false;
     }
 
-    const QString root = QDir(libPath).canonicalPath();
-    if (root.isEmpty())
+    // A table that is not on this machine — one saved on another computer — cannot be in this library.
+    if (QFileInfo(canonicalPath).canonicalFilePath().isEmpty())
     {
         return false;
     }
 
-    const QFileInfo info(canonicalPath);
-    const QString file = info.canonicalFilePath();
-    if (file.isEmpty())
-    {
-        return false;
-    }
-
-    // Canonical paths always use '/', also on Windows, where QDir::separator() is '\\'.
-    return file == root || file.startsWith(root + QLatin1Char('/'));
+    return OLibraryStorage::IsUnder(libPath, canonicalPath);
 }
 
 } // namespace MeasurementLibraryScanner

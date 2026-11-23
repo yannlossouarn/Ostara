@@ -90,7 +90,11 @@ public:
     auto FullSeamAllowancePath(const VContainer *data) const -> QPainterPath;
     template <class T> auto SeamAllowancePath(const QVector<T> &points) const -> QPainterPath;
     auto PassmarksPath(const VContainer *data) const -> QPainterPath;
+    /// The marks whose outline is drawn — every internal mark. A disc is NOT here: see FilledPlaceLabelPath.
     auto PlaceLabelPath(const VContainer *data) const -> QPainterPath;
+    /// The marks whose inside is painted — the discs (see IsFilledPlaceLabel). Two paths and not one, because
+    /// a single path filled would blacken every mark it crosses, not only the discs.
+    auto FilledPlaceLabelPath(const VContainer *data) const -> QPainterPath;
 
     auto IsSeamAllowanceValid(const VContainer *data) const -> bool;
 
@@ -114,6 +118,13 @@ public:
     auto GetGradedAlignPointId() const -> quint32;
     void SetGradedAlignPointId(quint32 id);
 
+    /// @brief Node carrying the vertical alignment of the graded sizes, NULL_ID when there is none.
+    ///
+    /// The vertical twin of GetGradedAlignPointId(): the two axes are independent, so a piece can
+    /// follow a point horizontally and an anchor vertically, or a different point on each axis.
+    auto GetGradedAlignPointVId() const -> quint32;
+    void SetGradedAlignPointVId(quint32 id);
+
     auto GetName() const -> QString override;
 
     auto GetPieceNumber() const -> uint override;
@@ -136,6 +147,9 @@ public:
 
     auto GetFreeText() const -> QString override;
     void SetFreeText(const QString &text) override;
+
+    auto GetPatternVersion() const -> quint32 override;
+    void SetPatternVersion(quint32 id) override;
 
     auto GetInternalPaths() const -> QVector<quint32>;
     auto GetInternalPaths() -> QVector<quint32> &;
@@ -200,6 +214,26 @@ public:
     auto FullSeamAllowancePointsWithRotation(const VContainer *data, vsizetype makeFirst) const
         -> QVector<VLayoutPoint>;
 
+    /** @brief While alive, on this thread, the seam allowance of a piece is computed once per (piece, container,
+     *  first node) and its mirror line once per (piece, container), then read back.
+     *
+     *  Building the layout piece asks for the same seam allowance over and over: each passmark, on each side, asks
+     *  for the allowance rotated to start at it, for the allowance not rotated, and for the mirror line — which
+     *  computes the allowance once more — first for its base line, then again for its lines. About eight
+     *  Equidistant per passmark for one per passmark and two per piece: 76 % of a piece of the graded range
+     *  (profiled 13-11-2026).
+     *
+     *  Open it only where neither the piece nor the container can change — VLayoutPiece::Create. The piece is told
+     *  apart by its shared data: a copy that is changed detaches and is a new key. Scopes nest. */
+    class SeamAllowanceMemoScope
+    {
+    public:
+        SeamAllowanceMemoScope();
+        ~SeamAllowanceMemoScope();
+        SeamAllowanceMemoScope(const SeamAllowanceMemoScope &) = delete;
+        auto operator=(const SeamAllowanceMemoScope &) -> SeamAllowanceMemoScope & = delete;
+    };
+
     auto IsManualFoldHeight() const -> bool;
     void SetManualFoldHeight(bool value);
 
@@ -231,6 +265,9 @@ public:
     auto SeamAllowanceMirrorLine(const VContainer *data) const -> QLineF;
 
 private:
+    /// The one body both @ref PlaceLabelPath and @ref FilledPlaceLabelPath read: the labels whose type is a
+    /// disc, or the others.
+    auto PlaceLabelsPath(const VContainer *data, bool filled) const -> QPainterPath;
     QSharedDataPointer<VPieceData> d;
 
     auto GetValidRecords() const -> QVector<CustomSARecord>;

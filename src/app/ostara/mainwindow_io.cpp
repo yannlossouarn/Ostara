@@ -33,6 +33,7 @@
 #include "ui_mainwindow.h"
 #include "mainwindow_helpers.h"
 #include "widgets/ODockManager.h"
+#include "widgets/InfoBlock/OPieceCartoucheStorage.h"
 #include "../vmisc/vabstractvalapplication.h"
 #include "../vmisc/vvalentinasettings.h"
 #include "../vmisc/vsysexits.h"
@@ -57,6 +58,7 @@
 #include "../vexception/vexception.h"
 #include "../vmisc/projectversion.h"
 #include "../vtools/tools/othumbnailcache.h"
+#include "../vtools/tools/vtoolseamallowance.h"
 #include "../vwidgets/vmaingraphicsscene.h"
 #include <QApplication>
 #include <QComboBox>
@@ -74,6 +76,7 @@
 #include <QPushButton>
 #include <QSettings>
 #include <QScreen>
+#include <QSet>
 #include <QTimer>
 #include <QtConcurrent>
 #include <chrono>
@@ -111,6 +114,97 @@ static void ShowPatternOpenError(QWidget *parent, const QString &details)
 }
 
 //---------------------------------------------------------------------------------------------------------------------
+/** @brief The resources a pattern names and that are nowhere in their folder.
+ *
+ * A cartouche whose template file is missing renders nothing at all — no border, no block, no message — and an
+ * annotation whose style is missing is drawn in the default one without saying so. Both names stay in the pattern
+ * (that is right: an edit must never overwrite them), so the only moment the absence can be said is at open.
+ *
+ * Reading must not write: the style library is read through `ReadAnnotationStyles()`, not through the loader that
+ * installs the built-in Default on a first launch — opening a pattern is not the moment to create files in a
+ * library. And a folder that does not exist says nothing about the files it should hold: accusing a template of
+ * being absent would name the wrong culprit, the folder being the problem the library dialogs already explain.
+ *
+ * The template is resolved the way the renderer resolves it (OInfoBlockResolver): the pattern's own name, then the
+ * favourite from the settings, then "Default". A piece-level override is not checked — the pattern's own name is
+ * the one that covers the whole document.
+ *
+ * @return one sentence per missing resource, worded for the status bar; empty when everything resolves.
+ */
+static auto MissingLibraryResources(const VAbstractPattern *doc) -> QStringList
+{
+    QStringList missing;
+    if (doc == nullptr)
+    {
+        return missing;
+    }
+
+    QString templateName = doc->GetCartoucheTemplate();
+    if (templateName.isEmpty())
+    {
+        templateName = VAbstractApplication::VApp()->Settings()->GetDefaultCartoucheTemplate();
+    }
+    if (templateName.isEmpty())
+    {
+        templateName = QStringLiteral("Default");
+    }
+
+    const QString templatesDirectory = OPieceCartoucheStorage::DefaultDirectory();
+    if (QDir(templatesDirectory).exists())
+    {
+        bool found = false;
+        for (const QString &path : OPieceCartoucheStorage::ScanDirectory(templatesDirectory))
+        {
+            if (QFileInfo(path).completeBaseName() == templateName)
+            {
+                found = true;
+                break;
+            }
+        }
+        if (not found)
+        {
+            missing << QCoreApplication::translate("MainWindow", "cartouche template « %1 »").arg(templateName);
+        }
+    }
+
+    // Every distinct style the document names, missing from the library's own file. Sorted, so the sentence
+    // does not change shape from one opening to the next.
+    const QString stylesDirectory = OPieceCartoucheStorage::AnnotationStylesDirectory();
+    if (QDir(stylesDirectory).exists())
+    {
+        const QDomNodeList annotations = doc->elementsByTagName(VToolSeamAllowance::TagAnnotation);
+        if (not annotations.isEmpty())
+        {
+            QSet<QString> known;
+            for (const OPieceCartoucheStorage::AnnotationStyleEntry &entry : OPieceCartoucheStorage::ReadAnnotationStyles())
+            {
+                known.insert(entry.name);
+            }
+
+            QStringList absent;
+            for (int i = 0; i < annotations.size(); ++i)
+            {
+                const QString styleName = annotations.at(i).toElement().attribute(VAbstractPattern::AttrTemplate);
+                if (styleName.isEmpty() || styleName == QStringLiteral("Default") || known.contains(styleName)
+                    || absent.contains(styleName))
+                {
+                    continue;
+                }
+                absent << styleName;
+            }
+
+            absent.sort();
+            for (const QString &styleName : absent)
+            {
+                missing << QCoreApplication::translate("MainWindow", "annotation style « %1 »").arg(styleName);
+            }
+        }
+    }
+
+    return missing;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
 /** @brief Keep the main window inside the screen's available area.
  *
  * The default size in mainwindow.ui is 1380x1051 — wider and taller than many laptop screens — and a restored
@@ -122,10 +216,17 @@ static void ShowPatternOpenError(QWidget *parent, const QString &details)
  *
  * Sophie, 03-11-2026: a 1024x768 screen. The size is clamped only when it does not fit; a window that already
  * fits is left exactly where the user put it, and one that hangs off an edge is moved back inside.
+ *
+ * The ninth-tenths margin is for the size the window carries when nothing has chosen one yet — the default of
+ * mainwindow.ui. A size restored from the preferences, or given by the reader by dragging the window, is kept
+ * whole as long as it fits: it is not the screen's business to shrink it. Applying the margin to every window
+ * undid every resize twice, at start-up and again when the first pattern was opened. Sophie, 09-11-2026.
  */
 void MainWindow::FitMainWindowToScreen()
 {
-    if (isHidden())
+    // A maximised or full-screen window is already the screen's own geometry: resizing it here would only
+    // rewrite the geometry it returns to when it is restored.
+    if (isHidden() || isMaximized() || isFullScreen())
     {
         return;
     }
@@ -142,9 +243,11 @@ void MainWindow::FitMainWindowToScreen()
     const int frameWidth = qMax(0, frame.width() - width());
     const int frameHeight = qMax(0, frame.height() - height());
     const int maxWidth = qMax(1, available.width() - frameWidth);
-    // Nine tenths of the height, not all of it: a window whose bottom touches the taskbar reads as
-    // maximised and leaves no air around the canvas. Sophie, 03-11-2026.
-    const int maxHeight = qMax(1, (available.height() - frameHeight) * 9 / 10);
+    // The whole usable height is the limit; nine tenths of it is the limit only for the default size of
+    // mainwindow.ui — a window whose bottom touches the taskbar reads as maximised and leaves no air around
+    // the canvas. Sophie, 03-11-2026, revised 09-11-2026: a size already settled is honoured as it is.
+    const int fitHeight = qMax(1, available.height() - frameHeight);
+    const int maxHeight = m_initialSizeSettled ? fitHeight : qMax(1, fitHeight * 9 / 10);
 
     if (width() > maxWidth || height() > maxHeight)
     {
@@ -162,6 +265,9 @@ void MainWindow::FitMainWindowToScreen()
     {
         move(x, y);
     }
+
+    // From now on the window has a size of its own — the one it was just given, or the one it came with.
+    m_initialSizeSettled = true;
 }
 
 //---------------------------------------------------------------------------------------------------------------------
@@ -175,7 +281,10 @@ void MainWindow::ReadSettings()
 
     if (settings->status() == QSettings::NoError)
     {
-        restoreGeometry(settings->GetGeometry());
+        // A geometry that was really restored is a size of the reader's own: FitMainWindowToScreen() keeps it
+        // whole instead of applying the ninth-tenths opening margin. Only the default of mainwindow.ui, which
+        // is what a first start carries, gets that margin. Sophie, 09-11-2026.
+        m_initialSizeSettled = restoreGeometry(settings->GetGeometry());
         const bool dockLayoutRestored = restoreState(settings->GetToolbarsState(), kToolbarStateVersion);
 
         // Load per-mode dock layouts so the first entry into a mode after startup
@@ -374,15 +483,10 @@ void MainWindow::setCurrentFile(const QString &fileName)
     {
         qCDebug(vMainWindow, "Updating recent file list.");
         VValentinaSettings *settings = VAbstractValApplication::VApp()->ValentinaSettings();
-        QStringList files = settings->GetRecentFileList();
-        files.removeAll(fileName);
-        files.prepend(fileName);
-        while (files.size() > MaxRecentFilesStored)
-        {
-            files.removeLast();
-        }
-
-        settings->SetRecentFileList(files);
+        // One entry per file, and the file just opened becomes the first one: the settings move the entry
+        // that already holds this file instead of adding a second one (same file, another spelling of its
+        // path — macOS keeps the case it was created with).
+        settings->AddRecentFile(fileName, MaxRecentFilesStored);
         UpdateRecentFileActions();
 
         qCDebug(vMainWindow, "Updating restore file list.");
@@ -587,15 +691,18 @@ void MainWindow::on_actionOpen_triggered()
         return;
     }
 
-    // Only now: showing the editor before the dialog would hide the Welcome screen under an empty canvas
-    // if the dialog were then refused.
-    ShowEditor();
-    if (!LoadPattern(filePath))
+    // LoadPattern shows the editor itself once a pattern is actually open — showing it first made the canvas
+    // flash for nothing when the opening was then refused.
+    const auto result = LoadPattern(filePath);
+    if (result == PatternLoadResult::Failed)
     {
         // The opening was refused — no usable measurement table, or the reader gave it up. An empty editor
         // is not an answer: back to the welcome screen, from where the file can be tried again.
         ShowWelcomeScreen();
     }
+    // PatternLoadResult::Delegated is not a refusal: this window keeps the pattern it already shows, and the
+    // chosen file opens in another process's window. Switching to the Welcome screen here would hide the
+    // pattern being edited with no way back to it.
 }
 
 
@@ -615,6 +722,9 @@ void MainWindow::Clear()
     // cleared must not outlive it, or the next document's pieces — whose ids restart at 1 — would
     // paint them until the first snapshot round trip replaces them.
     OThumbnailCache::Clear();
+    // The remembered "what the miniatures draw" belongs to the document being cleared: keeping it
+    // would make the next file's first edit look unchanged, and no drawing would ever be captured.
+    m_thumbnailSnapshotDigest.clear();
     pattern->Clear();
     qCDebug(vMainWindow, "Clearing pattern.");
     if (not VAbstractValApplication::VApp()->GetPatternPath().isEmpty() && not doc->MPath().isEmpty())
@@ -909,7 +1019,7 @@ auto MainWindow::OpenNewValentina(const QString &fileName) const -> bool
  * @brief LoadPattern open pattern file.
  * @param fileName name of file.
  */
-auto MainWindow::LoadPattern(QString fileName, const QString &customMeasureFile) -> bool
+auto MainWindow::LoadPattern(QString fileName, const QString &customMeasureFile) -> PatternLoadResult
 {
     qCDebug(vMainWindow, "Loading new file %s.", qUtf8Printable(fileName));
 
@@ -934,17 +1044,18 @@ auto MainWindow::LoadPattern(QString fileName, const QString &customMeasureFile)
             });
     }
 
-    // We have unsaved changes or load more then one file per time
+    // We have unsaved changes or load more than one file at a time: this window keeps its pattern and the
+    // file opens in another process's window. Not a failure — the caller must not treat it as one.
     if (OpenNewValentina(fileName))
     {
-        return false;
+        return PatternLoadResult::Delegated;
     }
 
     if (fileName.isEmpty())
     {
         qCDebug(vMainWindow, "Got empty file.");
         Clear();
-        return false;
+        return PatternLoadResult::Failed;
     }
 
     if (fileName.endsWith(".vit"_L1) || fileName.endsWith(".vst"_L1))
@@ -965,7 +1076,7 @@ auto MainWindow::LoadPattern(QString fileName, const QString &customMeasureFile)
                 }
 
                 // Legacy Tape external launch removed — Ostara handles .vst/.vit internally
-                return false;
+                return PatternLoadResult::Failed;
             }
         }
         catch (VException &e)
@@ -981,7 +1092,7 @@ auto MainWindow::LoadPattern(QString fileName, const QString &customMeasureFile)
             {
                 QCoreApplication::exit(V_EX_NOINPUT);
             }
-            return false;
+            return PatternLoadResult::Failed;
         }
     }
 
@@ -996,7 +1107,7 @@ auto MainWindow::LoadPattern(QString fileName, const QString &customMeasureFile)
     {
         if (not IgnoreLocking(m_lock->GetLockError(), fileName, VApplication::IsGUIMode()))
         {
-            return false;
+            return PatternLoadResult::Failed;
         }
     }
 
@@ -1101,16 +1212,28 @@ auto MainWindow::LoadPattern(QString fileName, const QString &customMeasureFile)
         // build carries it too, while the save schema no longer declares it. Silent by design, see the function.
         StripGroupTags(doc);
 
-        // First take out the layer items that no tool of the piece can produce — a pair naming a tool the file no
-        // longer holds, or an object its tool does not define. Both are acted on when a layer is hidden, and the
-        // second one can pin an object of a hidden layer on screen. Silent by design, and it runs BEFORE the two
-        // passes below so they count the orphans on what is left.
-        CleanStaleLayerItems(doc);
-
-        // A cut's two halves are objects of their own for the layers; a file written before that rule names
-        // neither. Give an unlayered half the layers of the curve it replaces, so it stays with the drawing it
-        // takes the place of instead of falling into the automatic "Unnamed" layer.
+        // A cut's two halves, the pieces of an armhole curve and of a segmented spline path, and the pieces a copy
+        // of a cut curve is drawn with are objects of their own for the layers; a file written before that rule
+        // names none of them. Give an unlayered piece the layers of the drawing it replaces, so it stays with it
+        // instead of falling into the automatic "Unnamed" layer.
+        //
+        // And the copy that NO piece replaces — every cut box off, so the canvas still draws the copy whole —
+        // takes the layers of the curve it copies. A build that read the pieces' attribute alone had let the
+        // loading pass throw that copy out of its layer, and a curve no layer names is drawn whatever the layers
+        // say: an .ostara written by it, and a .val converted by it, came back with curves on screen that their
+        // hidden layers had no hold on. This pass puts them back before the stale entries are judged.
+        //
+        // This runs FIRST, before the stale entries are taken out, and the order is the rule: a layer that still
+        // names the copy a piece replaces is exactly the layer that piece belongs to, and cutting the copy's entry
+        // beforehand would leave the pass nothing to inherit from.
         CoupleCutSegmentsToBaseLayers(doc);
+
+        // Then take out the layer items that no tool of the piece can produce — a pair naming a tool the file no
+        // longer holds, or an object its tool does not draw. Both are acted on when a layer is hidden, and the
+        // second one can pin an object of a hidden layer on screen; a copy the canvas replaced with its pieces is
+        // one of them, so it leaves the layers here. Silent by design, and it still runs BEFORE the two passes
+        // below so they count the orphans on what is left.
+        CleanStaleLayerItems(doc);
 
         // The automatic layer can be left empty by the pass above (a pair no tool can produce was its only
         // content): it is a technical remnant, not a layer of the piece, and it goes before the normalisation
@@ -1149,19 +1272,19 @@ auto MainWindow::LoadPattern(QString fileName, const QString &customMeasureFile)
                 Clear();
                 if (path.isEmpty())
                 {
-                    qCCritical(vMainWindow, "%s",
-                               qUtf8Printable(tr("The pattern reads measurements and no table was chosen.")));
+                    qCWarning(vMainWindow, "%s",
+                              qUtf8Printable(tr("The pattern reads measurements and no table was chosen.")));
                 }
                 else
                 {
-                    qCCritical(vMainWindow, "%s",
-                               qUtf8Printable(tr("The measurements file '%1' could not be found.").arg(path)));
+                    qCWarning(vMainWindow, "%s",
+                              qUtf8Printable(tr("The measurements file '%1' could not be found.").arg(path)));
                 }
                 if (not VApplication::IsGUIMode())
                 {
                     QCoreApplication::exit(V_EX_NOINPUT);
                 }
-                return false;
+                return PatternLoadResult::Failed;
             }
         }
 
@@ -1239,7 +1362,7 @@ auto MainWindow::LoadPattern(QString fileName, const QString &customMeasureFile)
                 {
                     VAbstractValApplication::VApp()->setOpeningPattern();
                     Clear();
-                    return false;
+                    return PatternLoadResult::Failed;
                 }
 
                 fixedMPath = newPath;
@@ -1248,17 +1371,17 @@ auto MainWindow::LoadPattern(QString fileName, const QString &customMeasureFile)
 
             if (not LoadMeasurements(fileName, fixedMPath))
             {
-                qCCritical(vMainWindow, "%s",
-                           qUtf8Printable(tr("The measurements file '%1' could not be found or "
-                                             "provides not enough information.")
-                                              .arg(fixedMPath)));
+                qCWarning(vMainWindow, "%s",
+                          qUtf8Printable(tr("The measurements file '%1' could not be found or "
+                                            "provides not enough information.")
+                                             .arg(fixedMPath)));
                 VAbstractValApplication::VApp()->setOpeningPattern(); // End opening file
                 Clear();
                 if (not VApplication::IsGUIMode())
                 {
                     QCoreApplication::exit(V_EX_NOINPUT);
                 }
-                return false;
+                return PatternLoadResult::Failed;
             }
 
             m_watcher->addPath(fixedMPath);
@@ -1285,7 +1408,7 @@ auto MainWindow::LoadPattern(QString fileName, const QString &customMeasureFile)
         {
             QCoreApplication::exit(V_EX_NOINPUT);
         }
-        return false;
+        return PatternLoadResult::Failed;
     }
 
     m_progressBar->setVisible(true);
@@ -1319,6 +1442,15 @@ auto MainWindow::LoadPattern(QString fileName, const QString &customMeasureFile)
         // NewSceneRect, ZoomFitBest etc. operate with correct widget dimensions.
         ShowEditor();
 
+        // A template or a style the pattern names and that is not in its folder draws nothing, silently: said
+        // once here, as the pattern becomes readable, because the names stay in the pattern and nothing else
+        // would ever mention them.
+        if (const QStringList missing = MissingLibraryResources(doc); not missing.isEmpty())
+        {
+            statusBar()->showMessage(tr("Not found in the library: %1.").arg(missing.join(QStringLiteral(", "))),
+                                     10000);
+        }
+
         // Fit scene size to best size for first show
         ZoomFirstShow();
 
@@ -1326,11 +1458,11 @@ auto MainWindow::LoadPattern(QString fileName, const QString &customMeasureFile)
 
         VAbstractValApplication::VApp()->setOpeningPattern(); // End opening file
         m_statusLabel->setText(QString());
-        return true;
+        return PatternLoadResult::Loaded;
     }
 
     VAbstractValApplication::VApp()->setOpeningPattern(); // End opening file
-    return false;
+    return PatternLoadResult::Failed;
 }
 
 
@@ -1486,9 +1618,10 @@ auto MainWindow::SavePatternAs(const QString &fileName) -> bool
     {
         qCDebug(vMainWindow, "Failed to lock %s", qUtf8Printable(fileName));
         qCDebug(vMainWindow, "Error type: %d", m_lock->GetLockError());
-        qCCritical(vMainWindow, "%s",
-                   qUtf8Printable(tr("Failed to lock. This file already opened in another window. Expect "
-                                     "collissions when run 2 copies of the program.")));
+        // The pattern was saved; only the lock could not be taken. See the same case in the watermark window.
+        qCWarning(vMainWindow, "%s",
+                  qUtf8Printable(tr("Failed to lock. This file already opened in another window. Expect "
+                                    "collissions when run 2 copies of the program.")));
     }
 
     return result;
@@ -1563,26 +1696,12 @@ void MainWindow::UpdateWindowTitle()
     }
     setWindowFilePath(VAbstractValApplication::VApp()->GetPatternPath());
 
-#if defined(Q_OS_MAC)
-    static auto fileIcon = QIcon(QCoreApplication::applicationDirPath() + "/../Resources/Ostara.icns"_L1);
-    QIcon icon;
-    if (not VAbstractValApplication::VApp()->GetPatternPath().isEmpty())
-    {
-        if (not isWindowModified())
-        {
-            icon = fileIcon;
-        }
-        else
-        {
-            static QIcon darkIcon;
-
-            if (darkIcon.isNull())
-            {
-                darkIcon = QIcon(darkenPixmap(fileIcon.pixmap(16, 16)));
-            }
-            icon = darkIcon;
-        }
-    }
-    setWindowIcon(icon);
-#endif // defined(Q_OS_MAC)
+    // No window icon on macOS — deliberately, and for a reason worth keeping.
+    // A macOS window shows no icon in its title bar: the document marker comes from
+    // `setWindowFilePath` just above, and the modified state from the "[*]" placeholder in the
+    // title. Setting one anyway crosses Qt's Cocoa bridge, which converts the icon through
+    // `QImage::toCGImage()`. On macOS 27.2 that call dies in `CGImageCreate` (SIGTRAP, EXC_BREAKPOINT)
+    // as soon as the icon carries a color space, which the native 1024px variant of `Ostara.icns`
+    // does. Rabnest never sets one on macOS, and our own `main.cpp` already skips the application
+    // icon there: this keeps the rule in one place. See Version120.md §33.
 }

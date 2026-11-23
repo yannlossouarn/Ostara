@@ -53,10 +53,13 @@
 #include "../vgeometry/ocontainment.h"
 #include "../vgeometry/osmoothpath.h"
 #include "../vgeometry/varc.h"
+#include "../vgeometry/vgobject.h"
+#include "../vgeometry/odisplaymirror.h"
 #include "../vgeometry/vellipticalarc.h"
 #include "../vgeometry/vplacelabelitem.h"
 #include "../vgeometry/vpointf.h"
 #include "../vlayout/vboundary.h"
+#include "../vlayout/vgraphicsfilledmarkitem.h"
 #include "../vlayout/vfoldline.h"
 #include "../vlayout/vlayoutpiece.h"
 #include "../vlayout/vlayoutpiecepath.h"
@@ -424,7 +427,7 @@ auto VToolSeamAllowance::Create(VToolSeamAllowanceInitData &initData) -> VToolSe
 
     patternGraph->AddVertex(initData.id, VNodeType::PIECE, initData.doc->PatternBlockMapper()->GetActiveId());
 
-    const auto varData = initData.data->DataDependencyVariables();
+    const auto varData = initData.doc->DependencyVariables(initData.data);
     AddPieceDependencies(initData.id, initData.detail, initData.doc, varData);
 
     if (initData.typeCreation != Source::FromGui && initData.parse != Document::FullParse)
@@ -727,8 +730,15 @@ void VToolSeamAllowance::AddAttributes(VAbstractPattern *doc, QDomElement &domEl
                                      [](int val) noexcept { return val == 2; });
     doc->SetAttributeOrRemoveIf<quint32>(domElement, AttrGradedAlignPoint, piece.GetGradedAlignPointId(),
                                          [](quint32 id) noexcept { return id <= NULL_ID; });
+    doc->SetAttributeOrRemoveIf<quint32>(domElement, AttrGradedAlignPointV, piece.GetGradedAlignPointVId(),
+                                         [](quint32 id) noexcept { return id <= NULL_ID; });
     doc->SetAttributeOrRemoveIf<uint>(domElement, AttrPieceNumber, piece.GetPieceNumber(),
                                       [](uint number) noexcept { return number == 0; });
+    // Absent = the "all versions" entry, which is what a single-version pattern's pieces all wear:
+    // the attribute only exists to say that a piece belongs to one version rather than to every one.
+    doc->SetAttributeOrRemoveIf<quint32>(domElement, AttrPatternVersion, piece.GetPatternVersion(),
+                                         [allVersions = doc->AllVersionsId()](quint32 id) noexcept
+                                         { return id == allVersions; });
     doc->SetAttributeOrRemoveIf<int>(domElement, AttrCutFabricQty, piece.GetCutFabricQty(),
                                      [](int qty) noexcept { return qty == 0; });
     doc->SetAttributeOrRemoveIf<bool>(domElement, AttrCutFabricOnFold, piece.IsCutFabricOnFold(),
@@ -1055,6 +1065,8 @@ void VToolSeamAllowance::AddPieceGroups(VAbstractPattern *doc, QDomElement &domE
         doc->SetAttributeOrRemoveIf<quint32>(groupElement, AttrGradedAlignPointMember, group.alignPointMemberId,
                                              [](quint32 id) noexcept { return id <= NULL_ID; });
         doc->SetAttributeOrRemoveIf<bool>(groupElement, AttrGradedAlignOnPoint, group.alignOnPoint,
+                                          [](bool on) noexcept { return not on; });
+        doc->SetAttributeOrRemoveIf<bool>(groupElement, AttrGradedAlignOnPointV, group.alignOnPointV,
                                           [](bool on) noexcept { return not on; });
         doc->SetAttributeOrRemoveIf<bool>(groupElement, AttrInLayout, group.IsInLayout(),
                                           [](bool inLayout) noexcept { return inLayout; });
@@ -1694,6 +1706,10 @@ void VToolSeamAllowance::UpdateInfoBlocks()
         blockItem->SetBlockGeom(geom);
         blockItem->SetContent(lines, geom.fontScale);
     }
+
+    // The block replaced its own transform while sizing itself; on a mirrored piece it would be the
+    // only child facing the right way. Re-stated here, after the loop, never before.
+    ApplyDisplayMirror();
 }
 
 //---------------------------------------------------------------------------------------------------------------------
@@ -1795,7 +1811,39 @@ auto VToolSeamAllowance::ThumbnailContent() const -> QPainterPath
             }
         }
     }
+
+    // The miniature shows the piece, so it shows it as the piece stands: mirrored when the piece is.
+    // The words follow through their own offsets (see ResolveThumbnailWording), because a label is a
+    // point ON this drawing — mirror the drawing alone and every value would name a seam it no longer
+    // sits on.
+    if (const QTransform mirror = DisplayMirror(); not mirror.isIdentity())
+    {
+        content = mirror.map(content);
+    }
     return content;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+auto VToolSeamAllowance::ThumbnailContentDigest() const -> QString
+{
+    const QPainterPath content = ThumbnailContent();
+    // FNV-1a over the path's elements: the type and the two coordinates, as bits. Cheap enough to run
+    // on every committed edit, precise enough to tell a moved node from a still one.
+    quint64 hash = 1469598103934665603ULL;
+    const auto mix = [&hash](quint64 value)
+    {
+        hash ^= value;
+        hash *= 1099511628211ULL;
+    };
+    mix(static_cast<quint64>(content.elementCount()));
+    for (int i = 0; i < content.elementCount(); ++i)
+    {
+        const QPainterPath::Element element = content.elementAt(i);
+        mix(static_cast<quint64>(element.type));
+        mix(static_cast<quint64>(qRound64(element.x * 1000.0)));
+        mix(static_cast<quint64>(qRound64(element.y * 1000.0)));
+    }
+    return QString::number(hash, 16);
 }
 
 //---------------------------------------------------------------------------------------------------------------------
@@ -1837,7 +1885,10 @@ auto VToolSeamAllowance::ResolveThumbnailWording(const VPiece &piece, const OThu
     {
         OThumbnailItem::LabelView view;
         view.text = i < texts.values.size() ? texts.values.at(i) : QString();
-        view.offset = stored.at(i).offset;
+        // A placed word is a point of the drawing: it goes through the same reflection, or a mirrored
+        // miniature would print its values where the seams used to be. An unplaced one is laid out
+        // against the block at paint time and is left alone.
+        view.offset = stored.at(i).placed ? DisplayMirror().map(stored.at(i).offset) : stored.at(i).offset;
         view.placed = stored.at(i).placed;
         wording.labels.append(view);
     }
@@ -1881,18 +1932,28 @@ void VToolSeamAllowance::UpdateThumbnail()
         m_thumbnailItem->hide();
         return;
     }
-    const OThumbnailGeom geom =
-        OThumbnailItem::ResolveBlockGeom(data.Geom(), m_pieceBoundingRect, data.HasGeometry());
+    OThumbnailGeom geom = OThumbnailItem::ResolveBlockGeom(data.Geom(), m_pieceBoundingRect, data.HasGeometry());
+
+    // The block follows the piece to the mirrored side. Its DRAWING needs nothing here: it already
+    // shows the mirrored piece (`ThumbnailContent`).
+    if (not DisplayMirror().isIdentity())
+    {
+        geom.pos = ODisplayMirror::Placement(geom.pos, QSizeF(geom.width, geom.height), 0.0, MirrorAxisX());
+    }
 
     // **The words, resolved above the library.** Units, decimal separator and the languages the
     // legend is written in are all application knowledge, so the tool asks for them instead of
     // inventing them — the same door the information blocks and the annotations already use.
     const ThumbnailWording wording = ResolveThumbnailWording(detail, data);
 
-    m_thumbnailItem->SetLabels(wording.labels, wording.legend, data.LegendOffset(), data.HasLegendOffset());
+    // The legend sits in the drawing's own coordinates, like the values — so it takes the same
+    // reflection, or a mirrored miniature would caption a place the piece no longer has.
+    const QPointF legendOffset = data.HasLegendOffset() ? DisplayMirror().map(data.LegendOffset()) : data.LegendOffset();
+    m_thumbnailItem->SetLabels(wording.labels, wording.legend, legendOffset, data.HasLegendOffset());
     m_thumbnailItem->SetContent(content, contentBounds);
     m_thumbnailItem->SetBlockGeom(geom);
     m_thumbnailItem->setVisible(true);
+    ApplyDisplayMirror();
 }
 
 //---------------------------------------------------------------------------------------------------------------------
@@ -1937,7 +1998,12 @@ void VToolSeamAllowance::SaveThumbnailGeometry(const QPointF &pos, qreal width, 
     VPiece newDet = oldDet;
     OThumbnailData data = std::as_const(newDet).GetThumbnailData();
     OThumbnailGeom geom = data.Geom();
-    geom.pos = pos;
+    // What the canvas shows is the mirrored place; what the piece stores is its own frame. The very
+    // same call undoes its own placement — a reflection applied twice is the identity — so the two
+    // directions cannot drift apart.
+    geom.pos = DisplayMirror().isIdentity()
+                   ? pos
+                   : ODisplayMirror::Placement(pos, QSizeF(width, height), 0.0, MirrorAxisX());
     geom.width = width;
     geom.height = height;
     data.SetGeom(geom);
@@ -2004,6 +2070,9 @@ void VToolSeamAllowance::UpdateAnnotations()
         item->SetAnnotationGeom(geom, EvaluateAnnotationRotation(annotation.rotationFormula));
         item->setVisible(true);
     }
+
+    // After the loop, like the blocks: the annotation has just re-applied its own transform.
+    ApplyDisplayMirror();
 }
 
 //---------------------------------------------------------------------------------------------------------------------
@@ -2295,8 +2364,113 @@ void VToolSeamAllowance::PaintGroupMembershipMark(QPainter *painter) const
     // The drawing itself is shared with the Graded canvas, which has no tool to paint it
     // (OGroupMark): one rule, two carriers.
     const OPieceGroup &group = groups->value(groupId);
+
+    // The caption is read, like a cartouche: on a mirrored piece the reflection would reach its
+    // glyphs. Cancelling it for this drawing alone leaves the words upright, and the mark around the
+    // piece's own rectangle lands on itself — a rectangle reflected about its centre does not move.
+    if (DisplayMirror().isIdentity())
+    {
+        OGroupMark::Paint(painter, boundingRect(), OGroupMark::Caption(group.name),
+                          *VAbstractTool::data.GetPatternUnit());
+        return;
+    }
+
+    painter->save();
+    // The LINEAR flip, not the host's matrix: the painter works in this item's own frame, whose
+    // origin is the item's, and the host's matrix carries a translation to the piece's axis.
+    painter->setTransform(painter->transform() * QTransform().scale(-1.0, 1.0));
     OGroupMark::Paint(painter, boundingRect(), OGroupMark::Caption(group.name),
                       *VAbstractTool::data.GetPatternUnit());
+    painter->restore();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+auto VToolSeamAllowance::MirrorAxisX() const -> qreal
+{
+    const QRectF contour = m_seamAllowance->path().boundingRect();
+    return contour.isNull() ? path().boundingRect().center().x() : contour.center().x();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+auto VToolSeamAllowance::HasGeometryToMirror() const -> bool
+{
+    // ⚠️ **A piece without geometry is never mirrored.** The axis would read 0, and a reflection
+    // about x = 0 throws the whole piece to the other side of the canvas — where it reads as stray
+    // marks belonging to nothing. Some passes run before the first geometry is applied; the answer
+    // there is "nothing to see", never "mirror it about the origin".
+    return (not m_seamAllowance->path().boundingRect().isNull()) || (not path().boundingRect().isNull());
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+auto VToolSeamAllowance::DisplayMirror() const -> QTransform
+{
+    if (not VAbstractTool::data.GetPiece(m_id).IsForceFlipping())
+    {
+        return {};
+    }
+
+    // ── L'axe, et pourquoi c'est celui-là ────────────────────────────────────────────────────────
+    //
+    // Le centre du contour EXTÉRIEUR — ligne de couture et valeur de couture — c'est-à-dire
+    // exactement le rectangle que le plan de coupe retourne déjà (`VLayoutPiece::DetailBoundingRect`,
+    // oexportgeometry.cpp). Deux axes différents et la pièce changerait de place entre le canevas et
+    // le papier, pour un décalage qu'aucun message n'expliquerait.
+    //
+    // Et un rectangle réfléchi autour de son propre centre ne bouge pas : c'est ce qui permet de
+    // retourner la pièce sans la déplacer, donc sans toucher à mx/my ni à aucune coordonnée du
+    // modèle. Le miroir est un état de DESSIN ; les points, les chemins et le fichier ne changent pas.
+    return HasGeometryToMirror() ? VGObject::VerticalMirror(MirrorAxisX()) : QTransform();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void VToolSeamAllowance::ApplyDisplayMirror()
+{
+    const QTransform mirror = DisplayMirror();
+    // **Only when it changes.** `setTransform` is not a setter: it re-indexes the item in the scene
+    // and invalidates every cached transform below it, and this runs on every geometry pass — a
+    // drag would pay for it on each refresh even though nothing moved.
+    if (transform() != mirror)
+    {
+        setTransform(mirror);
+    }
+    const bool mirrored = not mirror.isIdentity();
+
+    // Everything that is READ rather than looked at is told the piece is mirrored, and cancels the
+    // flip in its own frame: it lands where the piece puts it, and its words stay upright. A
+    // reflected cartouche is an unreadable one — the rule the export already follows (`MirrorDecor`).
+    //
+    // ⚠️ **A flag, not the matrix above.** That one is taken about the PIECE's axis, in the piece's
+    // frame; a child applies its transform in its OWN frame, whose origin is its own corner. Handing
+    // the matrix over translated the child by a whole piece — which is how a miniature came to be
+    // drawn off the canvas, and a cartouche off its piece.
+    for (QGraphicsItem *child : childItems())
+    {
+        if (auto *block = qgraphicsitem_cast<OInfoBlockItem *>(child); block != nullptr)
+        {
+            block->SetDisplayMirror(mirrored);
+            continue;
+        }
+        if (auto *annotation = qgraphicsitem_cast<OAnnotationItem *>(child); annotation != nullptr)
+        {
+            annotation->SetDisplayMirror(mirrored);
+            continue;
+        }
+        if (auto *node = qgraphicsitem_cast<VNodePoint *>(child); node != nullptr)
+        {
+            node->SetLabelDisplayMirror(mirrored);
+            continue;
+        }
+        // ⚠️ **The miniature is deliberately absent, and it is not an oversight.** It is the one
+        // child that RESIZES by moving its own rect while the mouse moves, and a reflection on the
+        // item would leave the handle math and the drawn box in two different frames — the box
+        // collapsed to its minimum on the first move. It is placed mirrored instead, and its
+        // position is un-mirrored when the user's move is stored (see UpdateThumbnail and
+        // SaveThumbnailGeometry): the item itself knows nothing about mirrors, and its box behaves
+        // exactly as it always did.
+        // The fold-line captions are deliberately absent: their transform belongs to VFoldLine,
+        // which composes its own reflection. They are handled where that transform is written, in
+        // ApplyFoldLineLabel(). Touching them here would overwrite the angle of the fold line.
+    }
 }
 
 //---------------------------------------------------------------------------------------------------------------------
@@ -2310,6 +2484,8 @@ void VToolSeamAllowance::RefreshScale()
     m_seamAllowance->setPen(toolPen);
     m_passmarks->setPen(toolPen);
     m_placeLabels->setPen(toolPen);
+    // The disc paints its inside with this pen's colour (VGraphicsFilledMarkItem) — no brush to keep in step.
+    m_placeLabelsFilled->setPen(toolPen);
     m_foldLineMark->setPen(toolPen);
     m_foldLineLabel->setPen(toolPen);
 
@@ -2357,6 +2533,12 @@ auto VToolSeamAllowance::PassmarksPath() const -> QPainterPath
 auto VToolSeamAllowance::PlaceLabelsPath() const -> QPainterPath
 {
     return m_placeLabels->path();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+auto VToolSeamAllowance::FilledPlaceLabelsPath() const -> QPainterPath
+{
+    return m_placeLabelsFilled->path();
 }
 
 //---------------------------------------------------------------------------------------------------------------------
@@ -2657,13 +2839,13 @@ void VToolSeamAllowance::hoverEnterEvent(QGraphicsSceneHoverEvent *event)
         }
         else
         {
-            setCursor(VAbstractValApplication::VApp()->getSceneView()->viewport()->cursor());
+            unsetCursor(); // no cursor of its own: the view decides, and a copied bitmap would cross into Cocoa
         }
         QGraphicsPathItem::hoverEnterEvent(event);
     }
     else
     {
-        setCursor(VAbstractValApplication::VApp()->getSceneView()->viewport()->cursor());
+        unsetCursor(); // no cursor of its own: the view decides, and a copied bitmap would cross into Cocoa
     }
 }
 
@@ -2721,7 +2903,7 @@ void VToolSeamAllowance::contextMenuEvent(QGraphicsSceneContextMenuEvent *event)
 
     QAction *inLayoutOption = addToggle(tr("In layout"), inLayout);
     QAction *hideMainPathOption = addToggle(tr("Hide main path"), hideMainPath);
-    QAction *forceFlippingOption = addToggle(tr("Force flipping"), forceFlipping);
+    QAction *forceFlippingOption = addToggle(tr("Show mirrored"), forceFlipping);
 
     QAction *showFullPiece = menu.addAction(tr("Show full piece"));
     bool showFullChecked = false;
@@ -2870,6 +3052,7 @@ VToolSeamAllowance::VToolSeamAllowance(const VToolSeamAllowanceInitData &initDat
     m_grainLine(new VGrainlineItem(VColorRole::PieceColor, this)),
     m_passmarks(new QGraphicsPathItem(this)),
     m_placeLabels(new QGraphicsPathItem(this)),
+    m_placeLabelsFilled(new VGraphicsFilledMarkItem(this)),
     m_mirrorLine(new QGraphicsPathItem(this)),
     m_foldLineMark(new QGraphicsPathItem(this)),
     m_foldLineLabel(new QGraphicsPathItem(this)),
@@ -3118,6 +3301,7 @@ auto VToolSeamAllowance::ComputePieceGeometry(bool combineTogether, bool pieceSh
     geom.showMainPath = pieceShowMainPath || not detail.IsHideMainPath() || not detail.IsSeamAllowance();
 
     geom.placeLabels = detail.PlaceLabelPath(containerData);
+    geom.filledPlaceLabels = detail.FilledPlaceLabelPath(containerData);
 
     geom.valid = true;
     return geom;
@@ -3239,6 +3423,7 @@ void VToolSeamAllowance::ApplyPieceGeometry(const VToolSeamAllowanceGeometry &ge
     this->setPath(path);
 
     m_placeLabels->setPath(geom.placeLabels);
+    m_placeLabelsFilled->setPath(geom.filledPlaceLabels);
     m_saHighlights.Update(VAbstractTool::data.GetPiece(m_id), getData());
 
     if (geom.hasSeamAllowance)
@@ -3313,6 +3498,10 @@ void VToolSeamAllowance::ApplyPieceGeometry(const VToolSeamAllowanceGeometry &ge
 
     this->setFlag(QGraphicsItem::ItemSendsGeometryChanges, true);
 
+    // Last, once every child exists and knows where it stands: a child that arrived during this pass
+    // would otherwise be the only one left facing the other way on a mirrored piece.
+    ApplyDisplayMirror();
+
     // Now we can start checking validity of the grainline
     m_geometryIsReady = true;
 }
@@ -3346,8 +3535,11 @@ void VToolSeamAllowance::ToggleHideMainPath(bool checked)
 //---------------------------------------------------------------------------------------------------------------------
 void VToolSeamAllowance::ToggleForceFlipping(bool checked)
 {
-    VAbstractApplication::VApp()->getUndoStack()->push(
-        new TogglePieceForceFlipping(m_id, checked, &(VAbstractTool::data), doc));
+    auto *toggle = new TogglePieceForceFlipping(m_id, checked, &(VAbstractTool::data), doc);
+    // Unlike a layout flag this one is drawn: the piece turns over, so the canvas and every child
+    // that carries words have to be rebuilt through the mirror.
+    connect(toggle, &TogglePieceForceFlipping::Toggled, this, [this]() -> void { RefreshGeometry(true); });
+    VAbstractApplication::VApp()->getUndoStack()->push(toggle);
 }
 
 //---------------------------------------------------------------------------------------------------------------------
@@ -4074,12 +4266,38 @@ void VToolSeamAllowance::ApplyFoldLineLabel(const VFoldLine &foldLine, bool visi
         if (i < count)
         {
             foldLine.UpdateFoldLineLabel(item, i);
+            ApplyCaptionDisplayMirror(item);
         }
         else
         {
             item->setVisible(false);
         }
     }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void VToolSeamAllowance::ApplyCaptionDisplayMirror(QGraphicsSimpleTextItem *caption) const
+{
+    const QTransform mirror = DisplayMirror();
+    if (mirror.isIdentity() || caption == nullptr)
+    {
+        // Nothing to do: the transform VFoldLine just wrote is the one the piece would show
+        // unmirrored, and it is already UPRIGHT — a caption is read, so it must never be reflected.
+        return;
+    }
+
+    // ⚠️ **Post-multiplied, never replaced.** The caption's own matrix carries the angle of the fold
+    // line and where along it the words sit (`VFoldLine::UpdateFoldLineLabel`); overwriting it would
+    // stand the caption straight and lose the line it belongs to. The local reflection is therefore
+    // appended — it acts in the caption's own frame, about its own centre — while the host's
+    // reflection, applied on top of the whole thing, carries the pair to the mirrored side. One
+    // reflection there, one here: the two cancel for the glyphs, and the position follows the piece.
+    const QRectF rect = caption->boundingRect();
+    QTransform local;
+    local.translate(rect.center().x(), 0.0);
+    local.scale(-1.0, 1.0);
+    local.translate(-rect.center().x(), 0.0);
+    caption->setTransform(caption->transform() * local);
 }
 
 //---------------------------------------------------------------------------------------------------------------------

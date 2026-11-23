@@ -26,12 +26,15 @@
 
 #include "opiecedialog_piecestep.h"
 
+#include "../ifc/xml/vabstractpattern.h"
+#include "../vmisc/FactoryWidgets.h"
 #include "../widgets/ogradedalignwidget.h"
 #include "../vtools/dialogs/dialogtoolbox.h"
 
 #include <algorithm>
 
 #include <QCheckBox>
+#include <QComboBox>
 #include <QFontMetrics>
 #include <QFormLayout>
 #include <QFrame>
@@ -39,13 +42,15 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPlainTextEdit>
+#include <QSignalBlocker>
 #include <QSpinBox>
 #include <QTabWidget>
 #include <QVBoxLayout>
 
 //---------------------------------------------------------------------------------------------------------------------
-OPiecePieceStep::OPiecePieceStep(QWidget *parent)
-  : QWidget(parent)
+OPiecePieceStep::OPiecePieceStep(VAbstractPattern *doc, QWidget *parent)
+  : QWidget(parent),
+    m_doc(doc)
 {
     auto *mainLayout = new QVBoxLayout(this);
     auto *form = new QFormLayout();
@@ -77,7 +82,16 @@ OPiecePieceStep::OPiecePieceStep(QWidget *parent)
     numberRow->addStretch();
     form->addRow(tr("Piece number"), numberRow);
 
+    // Version — the pattern version this piece belongs to. One per piece, never several: the pieces
+    // common to every version wear the "all versions" entry, the others the one they were given.
+    // Greyed out while the pattern declares only one version, because there is nothing to choose.
+    m_versionCombo = MakeComboBox(this);
+    form->addRow(tr("Version"), m_versionCombo);
+    m_versionLabel = qobject_cast<QLabel *>(form->labelForField(m_versionCombo));
+
     mainLayout->addLayout(form);
+
+    RefreshVersions();
 
     // Cut — three fabric layers, each with quantity + on-fold flag. No "block" here.
     m_cutTabs = new QTabWidget();
@@ -123,12 +137,12 @@ OPiecePieceStep::OPiecePieceStep(QWidget *parent)
     flagsSeparator->setFrameShadow(QFrame::Sunken);
     flagsLayout->addWidget(flagsSeparator);
 
-    m_forceFlippingCheck = new QCheckBox(tr("Force flipping"));
-    m_forceFlippingCheck->setToolTip(tr("Force piece to be always flipped in a layout."));
+    m_forceFlippingCheck = new QCheckBox(tr("Show mirrored"));
+    m_forceFlippingCheck->setToolTip(tr("Show the piece mirrored: on the canvas, in Graded, in every export and in the miniature."));
     flagsLayout->addWidget(m_forceFlippingCheck);
 
     m_symmetricalCopyCheck = new QCheckBox(tr("Symmetrical copy"));
-    m_symmetricalCopyCheck->setToolTip(tr("When the number of copies is greater than 1 and 'Force flipping' is selected, each even-numbered copy of the piece will be flipped vertically."));
+    m_symmetricalCopyCheck->setToolTip(tr("When the number of copies is greater than 1 and 'Show mirrored' is set, each even-numbered copy is flipped the other way."));
     // A new piece is born with the symmetrical copy checked (cutting plan prerequisite).
     m_symmetricalCopyCheck->setChecked(true);
     flagsLayout->addWidget(m_symmetricalCopyCheck);
@@ -136,6 +150,62 @@ OPiecePieceStep::OPiecePieceStep(QWidget *parent)
     mainLayout->addWidget(m_flagsBlock);
 
     mainLayout->addStretch();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void OPiecePieceStep::RefreshVersions()
+{
+    if (m_versionCombo == nullptr)
+    {
+        return;
+    }
+
+    const QSignalBlocker blocker(m_versionCombo);
+    const quint32 previous = m_versionCombo->currentData().toUInt();
+    m_versionCombo->clear();
+
+    // No document = the step is not naming a piece (the « Link pieces » dialog names a group): a
+    // version belongs to a piece, so the row has nothing to say and goes away with its label.
+    const bool forAPiece = m_doc != nullptr;
+    m_versionCombo->setVisible(forAPiece);
+    if (m_versionLabel != nullptr)
+    {
+        m_versionLabel->setVisible(forAPiece);
+    }
+    if (!forAPiece)
+    {
+        m_versionCombo->setEnabled(false);
+        return;
+    }
+
+    const quint32 allVersions = m_doc->AllVersionsId();
+    if (!m_doc->IsMultiVersion())
+    {
+        m_versionCombo->addItem(m_doc->GetPatternVersion(allVersions).name, allVersions);
+        m_versionCombo->setEnabled(false);
+        return;
+    }
+
+    for (const VPatternVersionData &version : m_doc->GetPatternVersions())
+    {
+        m_versionCombo->addItem(version.name, version.id);
+    }
+    const int index = m_versionCombo->findData(previous != 0 ? previous : allVersions);
+    m_versionCombo->setCurrentIndex(index >= 0 ? index : 0);
+    m_versionCombo->setEnabled(true);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+auto OPiecePieceStep::GetPatternVersion() const -> quint32
+{
+    if (m_versionCombo != nullptr)
+    {
+        if (const quint32 id = m_versionCombo->currentData().toUInt(); id != 0)
+        {
+            return id;
+        }
+    }
+    return m_doc != nullptr ? m_doc->AllVersionsId() : 1;
 }
 
 //---------------------------------------------------------------------------------------------------------------------

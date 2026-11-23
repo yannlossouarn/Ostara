@@ -288,7 +288,7 @@ bool MainWindow::EnterGradedMode()
     if (not LoadGradedTableAxes(&axes, &axisValues))
     {
         QMessageBox::information(this, tr("Graded mode"),
-                                 tr("Graded mode needs a multi-size measurements table (.omt)."),
+                                 tr("Graded mode needs a multi-size measurements table (.omt). Load one from the Measurements menu, then try again."),
                                  QMessageBox::Ok);
         return false;
     }
@@ -471,8 +471,9 @@ QString MainWindow::CreateGradedRange(const QString &canonical, const QStringLis
         }
         if (ranges.contains(range.name))
         {
-            QMessageBox::warning(this, tr("Graded mode"),
-                                 tr("A size range with this name already exists."), QMessageBox::Ok);
+            // Unreachable from the dialog, which greys its OK and writes "already in this pattern" under the name
+            // field. Kept as a guard, but it must not open a box on top of that: the log is enough.
+            qWarning() << "Size range name already taken, ignored:" << range.name;
             return {};
         }
         ranges.insert(range.name, range);
@@ -590,7 +591,7 @@ bool MainWindow::AddGradedRange()
     if (not LoadGradedTableAxes(&axes, &axisValues))
     {
         QMessageBox::information(this, tr("Graded mode"),
-                                 tr("Graded mode needs a multi-size measurements table (.omt)."),
+                                 tr("Graded mode needs a multi-size measurements table (.omt). Load one from the Measurements menu, then try again."),
                                  QMessageBox::Ok);
         return false;
     }
@@ -680,7 +681,10 @@ bool MainWindow::EditGradedRange(const QString &rangeName)
 
     const QString canonical =
         AbsoluteMPath(VAbstractValApplication::VApp()->GetPatternPath(), doc->MPath());
-    if (stored.measurement != canonical)
+    // The same rule the dock lists by: three answers to "is this the same table" in one place was
+    // one too many — a range could be listed, offered for editing and refused as "another table"
+    // in the same breath.
+    if (not OGradedSizeRanges::SameMeasurementTable(stored.measurement, canonical))
     {
         QMessageBox::information(this, tr("Graded mode"),
                                  tr("This size range belongs to another measurements table. Load "
@@ -743,8 +747,8 @@ bool MainWindow::EditGradedRange(const QString &rangeName)
     ranges.remove(rangeName);
     if (ranges.contains(edited.name))
     {
-        QMessageBox::warning(this, tr("Graded mode"),
-                             tr("A size range with this name already exists."), QMessageBox::Ok);
+        // Same guard as above: the edit dialog already refuses the name inline.
+        qWarning() << "Size range name already taken, ignored:" << edited.name;
         return false;
     }
     ranges.insert(edited.name, edited);

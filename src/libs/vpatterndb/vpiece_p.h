@@ -101,6 +101,9 @@ public:
      * the vertical alignment keeps working. Stored as the node id of this piece's own copy.
      */
     quint32 m_gradedAlignPointId{NULL_ID}; // NOLINT(misc-non-private-member-variables-in-classes)
+    // Second forced point, the vertical one: each axis carries its own, so the horizontal point can
+    // stay on the shoulder while the vertical pins the piece on another landmark.
+    quint32 m_gradedAlignPointVId{NULL_ID}; // NOLINT(misc-non-private-member-variables-in-classes)
 
     /** @brief Piece number displayed on the cartouche (0 = none). */
     uint m_pieceNumber{0}; // NOLINT(misc-non-private-member-variables-in-classes)
@@ -115,6 +118,10 @@ public:
 
     /** @brief Free text shown on the cartouche (piece level). */
     QString m_freeText{}; // NOLINT(misc-non-private-member-variables-in-classes)
+
+    /** @brief The pattern version this piece belongs to, by id. 1 = the "all versions" entry, which is
+     *  also where every piece of a single-version pattern lives. */
+    quint32 m_patternVersion{1}; // NOLINT(misc-non-private-member-variables-in-classes)
 
     quint32 m_mirrorLineStartPoint{NULL_ID}; // NOLINT(misc-non-private-member-variables-in-classes)
     quint32 m_mirrorLineEndPoint{NULL_ID};   // NOLINT(misc-non-private-member-variables-in-classes)

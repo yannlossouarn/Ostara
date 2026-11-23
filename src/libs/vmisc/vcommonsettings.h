@@ -102,40 +102,40 @@ public:
     void SetPathKnownMeasurements(const QString &value);
 
     auto GetPathMeasurementLibrary() const -> QString;
-    void SetPathMeasurementLibrary(const QString &value) const;
+    void SetPathMeasurementLibrary(const QString &value);
 
     auto GetPathCartoucheTemplates() const -> QString;
-    void SetPathCartoucheTemplates(const QString &value) const;
+    void SetPathCartoucheTemplates(const QString &value);
 
     auto GetPathPieces() const -> QString;
-    void SetPathPieces(const QString &value) const;
+    void SetPathPieces(const QString &value);
 
     auto GetPathPatterns() const -> QString;
-    void SetPathPatterns(const QString &value) const;
+    void SetPathPatterns(const QString &value);
 
     auto GetPathPdfTemplates() const -> QString;
-    void SetPathPdfTemplates(const QString &value) const;
+    void SetPathPdfTemplates(const QString &value);
 
     auto GetPathCoverPageTemplates() const -> QString;
-    void SetPathCoverPageTemplates(const QString &value) const;
+    void SetPathCoverPageTemplates(const QString &value);
 
     auto GetPathLogos() const -> QString;
-    void SetPathLogos(const QString &value) const;
+    void SetPathLogos(const QString &value);
 
     auto GetPathSymbols() const -> QString;
-    void SetPathSymbols(const QString &value) const;
+    void SetPathSymbols(const QString &value);
 
     auto GetPathSeamAllowances() const -> QString;
-    void SetPathSeamAllowances(const QString &value) const;
+    void SetPathSeamAllowances(const QString &value);
 
     auto GetPathClients() const -> QString;
-    void SetPathClients(const QString &value) const;
+    void SetPathClients(const QString &value);
 
     auto GetPathAnnotationStyles() const -> QString;
-    void SetPathAnnotationStyles(const QString &value) const;
+    void SetPathAnnotationStyles(const QString &value);
 
     auto GetPathCollections() const -> QString;
-    void SetPathCollections(const QString &value) const;
+    void SetPathCollections(const QString &value);
 
     auto GetCollectionsSortAscending() const -> bool;
     void SetCollectionsSortAscending(const bool &value);
@@ -227,10 +227,26 @@ public:
     auto IsFreeCurveMode() const -> bool;
     void SetFreeCurveMode(bool value);
 
+    /// @brief The one name the disk carries for this file, i.e. the identity of a recent entry.
+    ///        One file must hold one entry, and a file can be named several ways: macOS is case insensitive
+    ///        and keeps the case it was created with, so ".../BustedeBase.ostara" and ".../BusteDeBase.ostara"
+    ///        are the same file under two spellings. Canonicalising them gives that single name.
+    ///        Falls back on the absolute path for a file that is gone.
+    static auto RecentFileKey(const QString &path) -> QString;
+
     auto GetRecentFileList() const -> QStringList;
     void SetRecentFileList(const QStringList &value);
+    /// @brief Make @a path the most recent file, and only once: an entry already holding that file is moved
+    ///        to the head instead of a second one being added. The list is trimmed to @a maxStored entries.
+    void AddRecentFile(const QString &path, int maxStored);
+    /// @brief Take @a path out of the recent list. The file itself is untouched: opening it again puts it back.
+    void RemoveRecentFile(const QString &path);
     auto GetRecentMeasurementFileList() const -> QStringList;
     void SetRecentMeasurementFileList(const QStringList &value);
+    /// @brief Same as AddRecentFile, for the measurement tables' own list.
+    void AddRecentMeasurementFile(const QString &path, int maxStored);
+    /// @brief Same as RemoveRecentFile, for the measurement tables' own list.
+    void RemoveRecentMeasurementFile(const QString &path);
 
     auto GetRestoreFileList() const -> QStringList;
     void SetRestoreFileList(const QStringList &value);
@@ -368,6 +384,11 @@ public:
 
 signals:
     void KnownMeasurementsPathChanged(const QString &oldPath, const QString &newPath);
+
+    /// A library folder moved. Emitted by every path setter, once the value is written, with the
+    /// settings key it belongs to: the windows read these keys at the moment they are used, so without
+    /// this they keep answering from the previous folder until the user happens to touch something else.
+    void FolderPathChanged(const QString &key, const QString &oldPath, const QString &newPath);
     void PatternLabelFontSizeChanged(int size);
 
 protected:
@@ -380,6 +401,9 @@ protected:
 
 private:
     Q_DISABLE_COPY_MOVE(VCommonSettings) // NOLINT
+
+    /// Write one folder path and say it moved. Every path setter goes through here.
+    void SetFolderPath(const QString &key, const QString &value, const QString &previous);
 };
 
 //---------------------------------------------------------------------------------------------------------------------

@@ -34,12 +34,12 @@
 class QString;
 
 constexpr unsigned MAJOR_VERSION = 1;
-constexpr unsigned MINOR_VERSION = 1;
-constexpr unsigned DEBUG_VERSION = 3;
+constexpr unsigned MINOR_VERSION = 2;
+constexpr unsigned DEBUG_VERSION = 0;
 
 auto AppVersionStr() -> const QString &;
 
-/// @brief The version as it is meant to be read: "1.1.3", and nothing after it.
+/// @brief The version as it is meant to be read: "1.1.1", and nothing after it.
 ///
 /// AppVersionStr() carries a fourth field — the number of commits since the last release
 /// tag — which identifies a build. That is worth having where a build has to be told apart
@@ -65,8 +65,8 @@ constexpr int kToolbarStateVersion = 1;
 
 // Change version number in projectversion.cpp too.
 
-#define VER_FILEVERSION 1, 1, 3
-#define VER_FILEVERSION_STR "1.1.3\0"
+#define VER_FILEVERSION 1, 2, 0
+#define VER_FILEVERSION_STR "1.2.0\0"
 
 // #define V_PRERELEASE // Mark prerelease builds
 

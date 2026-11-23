@@ -118,6 +118,8 @@ auto VAbstractShortcutManager::ShortcutActionToString(VShortcutAction type) -> Q
             return "zoomin"_L1;
         case VShortcutAction::ZoomOut:
             return "zoomout"_L1;
+        case VShortcutAction::FullScreen:
+            return "fullscreen"_L1;
         case VShortcutAction::ZoomOriginal:
             return "zoomoriginal"_L1;
         case VShortcutAction::ZoomFitBest:
@@ -252,8 +254,6 @@ auto VAbstractShortcutManager::ShortcutActionToString(VShortcutAction type) -> Q
             return "exporttemplates"_L1;
         case VShortcutAction::ExportImage:
             return "exportimage"_L1;
-        case VShortcutAction::ExportDrawAs:
-            return "exportdrawas"_L1;
         case VShortcutAction::ExportDetailsAs:
             return "exportdetailsas"_L1;
         case VShortcutAction::ToolEllipticalArc:
@@ -310,6 +310,8 @@ auto VAbstractShortcutManager::ReadableName(VShortcutAction type) -> QString
             return tr("Zoom in", "shortcut for action");
         case VShortcutAction::ZoomOut:
             return tr("Zoom out", "shortcut for action");
+        case VShortcutAction::FullScreen:
+            return tr("Full screen", "shortcut for action");
         case VShortcutAction::ZoomOriginal:
             return tr("Zoom original", "shortcut for action");
         case VShortcutAction::ZoomFitBest:
@@ -444,8 +446,6 @@ auto VAbstractShortcutManager::ReadableName(VShortcutAction type) -> QString
             return tr("Export templates", "shortcut for action");
         case VShortcutAction::ExportImage:
             return tr("Export as image", "shortcut for action");
-        case VShortcutAction::ExportDrawAs:
-            return tr("Export draw as", "shortcut for action");
         case VShortcutAction::ExportDetailsAs:
             return tr("Export details as", "shortcut for action");
         case VShortcutAction::ToolEllipticalArc:

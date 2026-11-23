@@ -97,86 +97,6 @@ using QTextCodec = VTextCodec;
 
 using namespace Qt::Literals::StringLiterals;
 
-
-//---------------------------------------------------------------------------------------------------------------------
-void MainWindow::ExportDraw(const QString &fileName)
-{
-    QT_WARNING_PUSH
-    QT_WARNING_DISABLE_GCC("-Wnoexcept")
-
-    VLayoutExporter exporter;
-
-    QT_WARNING_POP
-
-    exporter.SetFileName(fileName);
-
-    int const verticalScrollBarValue = ui->view->verticalScrollBar()->value();
-    int const horizontalScrollBarValue = ui->view->horizontalScrollBar()->value();
-
-    QTransform const viewTransform = ui->view->transform();
-    ui->view->ZoomFitBest(); // Resize all labels
-    ui->view->repaint();
-    ui->view->ZoomOriginal(); // Set to original scale
-
-    // Enable all items on scene
-    const QList<QGraphicsItem *> qItems = m_sceneDraw->items();
-    for (auto *item : qItems)
-    {
-        item->setEnabled(true);
-        if (item->type() == VGraphicsSimpleTextItem::Type)
-        {
-            auto *text = dynamic_cast<VGraphicsSimpleTextItem *>(item);
-            text->RefreshColor(); // Regular update doesn't work on labels
-        }
-    }
-
-    ui->view->repaint();
-
-    const QRectF rect = m_sceneDraw->VisibleItemsBoundingRect();
-    m_sceneDraw->update(rect);
-    exporter.SetImageRect(rect);
-    exporter.SetOffset(rect.topLeft()); // Correct positions to fit SVG view rect
-
-    exporter.ExportToSVG(m_sceneDraw, QList<QGraphicsItem *>());
-
-    // Restore scale, scrollbars and current active pattern piece
-    ui->view->setTransform(viewTransform);
-    VMainGraphicsView::NewSceneRect(ui->view->scene(), ui->view);
-    ScaleChanged(ui->view->transform().m11());
-
-    ui->view->verticalScrollBar()->setValue(verticalScrollBarValue);
-    ui->view->horizontalScrollBar()->setValue(horizontalScrollBarValue);
-
-    m_sceneDraw->EnableTools();
-}
-
-
-//---------------------------------------------------------------------------------------------------------------------
-void MainWindow::ExportDrawAs(bool checked)
-{
-    Q_UNUSED(checked)
-
-    auto Uncheck = qScopeGuard([this] { ui->actionExportDraw->setChecked(false); });
-
-    QString const filters(tr("Scalable Vector Graphics files") + QStringLiteral("(*.svg)"));
-    QString const dir = QDir::homePath() + '/'_L1 + FileName() + QStringLiteral(".svg");
-    QString fileName = QFileDialog::getSaveFileName(this, tr("Save draw"), dir, filters, nullptr,
-                                                    VAbstractApplication::VApp()->NativeFileDialog());
-
-    if (fileName.isEmpty())
-    {
-        return;
-    }
-
-    if (QFileInfo const f(fileName); f.suffix().isEmpty() || f.suffix() != "svg"_L1)
-    {
-        fileName += ".svg"_L1;
-    }
-
-    ExportDraw(fileName);
-}
-
-
 //---------------------------------------------------------------------------------------------------------------------
 void MainWindow::ExportDetailsAs(bool checked)
 {
@@ -188,9 +108,10 @@ void MainWindow::ExportDetailsAs(bool checked)
 
     if (detailsInLayout.isEmpty())
     {
-        QMessageBox::information(this, tr("Layout mode"),
-                                 tr("You don't have enough details to export. Please, "
-                                    "include at least one detail in layout."),
+        // "Layout mode" no longer exists: this is the Details export, and the title has to name it.
+        QMessageBox::information(this, tr("Detail mode"),
+                                 tr("There is no piece to export. Switch a piece on in the Details dock, then try "
+                                    "again."),
                                  QMessageBox::Ok, QMessageBox::Ok);
         return;
     }
@@ -202,7 +123,10 @@ void MainWindow::ExportDetailsAs(bool checked)
     }
     catch (VException &e)
     {
-        QMessageBox::warning(this, tr("Export details"), tr("Can't export details.") + " \n"_L1 + e.ErrorMessage(),
+        QMessageBox::warning(this, tr("Export details"),
+                             tr("Ostara could not prepare the pieces for export:\n\n%1\n\nCheck that every piece "
+                                "has a main path and a seam allowance, then try again.")
+                                 .arg(e.ErrorMessage()),
                              QMessageBox::Ok, QMessageBox::Ok);
         return;
     }
@@ -234,7 +158,16 @@ void MainWindow::ExportDetailsAs(bool checked)
         // valeurs de couture, et c'est la géométrie des pièces qui change — pas un calque. La
         // préparation est donc refaite quand il est choisi, même si le contour principal, lui, ne
         // l'est pas. Voir PrepareDetailsForLayout.
-        const bool showMainPath = m_dialogSaveLayout->IsShowMainPath();
+        // ⚠️ **Cette option est une option DXF-AAMA/ASTM.** Sa case n'est même pas visible pour les
+        // autres formats — mais elle est enregistrée, puis relue et appliquée pour TOUS. Cochée une
+        // fois dans un export DXF, elle restait donc vraie et forçait `SetHideMainPath(false)` sur les
+        // exports SVG, PDF, etc. : une pièce dont le contour principal est masqué ressortait avec son
+        // contour, sans que rien dans la dialogue ne l'ait demandé. Elle ne vaut plus que pour les
+        // formats qui la montrent.
+        const LayoutExportFormats exportFormat = m_dialogSaveLayout->Format();
+        const bool showMainPath = m_dialogSaveLayout->IsShowMainPath()
+                                  && (exportFormat == LayoutExportFormats::DXF_AAMA
+                                      || exportFormat == LayoutExportFormats::DXF_ASTM);
         const bool noSeamAllowance = m_dialogSaveLayout->DxfCompatibility() == DXFApparelCompatibility::CLO3D;
         if (showMainPath || noSeamAllowance)
         {
@@ -243,26 +176,44 @@ void MainWindow::ExportDetailsAs(bool checked)
 
         ExportData(listDetails);
 
-        // Say it worked, and where it landed — the same word Graded mode and Export mode already
-        // give. The export path is not a single file for every format (a tiled PDF is a page per
-        // file), so the claim is checked rather than asserted: the named file when it is there, the
-        // folder it went to otherwise. A dialog that says "exported" over a write that failed would
-        // be worse than no dialog at all.
-        const QString suffix = VLayoutExporter::ExportFormatSuffix(m_dialogSaveLayout->Format());
-        const QString fileName = m_dialogSaveLayout->FileName() + suffix;
-        const QFileInfo exported(m_dialogSaveLayout->Path() + '/'_L1 + fileName);
-        if (exported.exists())
+        // ExportData() reports nothing about what it wrote: the exporter returns void, and a tiled PDF writes one
+        // file per page. The claim is therefore checked on the folder — at least one non-empty file whose name
+        // starts with the requested base name. It used to be enough that the folder existed, which announced
+        // "exported" over a write that had failed (a read-only key, a protected share, a folder needing rights).
+        // A dialog that says "exported" over a write that failed is worse than no dialog at all.
+        const QString baseName = m_dialogSaveLayout->FileName();
+        const QDir folder(m_dialogSaveLayout->Path());
+
+        QStringList written;
+        const QFileInfoList candidates = folder.entryInfoList(QStringList{baseName + '*'}, QDir::Files);
+        for (const QFileInfo &candidate : candidates)
+        {
+            if (candidate.size() > 0)
+            {
+                written << candidate.fileName();
+            }
+        }
+
+        if (written.isEmpty())
+        {
+            QMessageBox::warning(this, tr("Detail mode"),
+                                 tr("Nothing was written to this folder:\n%1\n\nIt does not allow writing — a "
+                                    "read-only key, a protected share, a folder that asks for rights. Choose "
+                                    "another folder.")
+                                     .arg(folder.absolutePath()),
+                                 QMessageBox::Ok);
+        }
+        else if (written.size() == 1)
         {
             QMessageBox::information(this, tr("Detail mode"),
                                      tr("The file \"%1\" was successfully exported to:\n%2")
-                                         .arg(fileName, exported.absolutePath()),
+                                         .arg(written.constFirst(), folder.absolutePath()),
                                      QMessageBox::Ok);
         }
-        else if (exported.dir().exists())
+        else
         {
             QMessageBox::information(this, tr("Detail mode"),
-                                     tr("The files were successfully exported to:\n%1")
-                                         .arg(exported.absolutePath()),
+                                     tr("The files were successfully exported to:\n%1").arg(folder.absolutePath()),
                                      QMessageBox::Ok);
         }
         m_dialogSaveLayout.clear();
@@ -275,7 +226,6 @@ void MainWindow::ExportDetailsAs(bool checked)
         return;
     }
 }
-
 
 
 //---------------------------------------------------------------------------------------------------------------------
@@ -476,7 +426,7 @@ void MainWindow::ProcessCMD()
 
         VAbstractValApplication::VApp()->SetUserMaterials(cmd->OptUserMaterials());
 
-        if (const bool loaded = LoadPattern(args.constFirst(), cmd->OptMeasurePath()); not loaded)
+        if (LoadPattern(args.constFirst(), cmd->OptMeasurePath()) != PatternLoadResult::Loaded)
         {
             return; // process only one input file
         }

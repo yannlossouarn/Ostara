@@ -45,6 +45,16 @@ VValentinaShortcutManager::VValentinaShortcutManager(QObject *parent)
 {
     Q_STATIC_ASSERT_X(static_cast<int>(VShortcutAction::LAST_ONE_DO_NOT_USE) == 88, "Check if all actions were used.");
 
+    // ⌃⌘F sous macOS, F11 ailleurs : la convention de chaque système. Le raccourci passe par le
+    // gestionnaire comme tous les autres, donc il est réassignable dans Préférences → Raccourcis.
+#if defined(Q_OS_MAC)
+    AddShortcut({VShortcutAction::FullScreen,
+                 {QKeySequence(Qt::CTRL | Qt::META | Qt::Key_F).toString()},
+                 {}});
+#else
+    AddShortcut({VShortcutAction::FullScreen, {QKeySequence(Qt::Key_F11).toString()}, {}});
+#endif
+
     AddShortcut({VShortcutAction::ZoomIn, KeyBindingsToStringList(QKeySequence::ZoomIn), {}});
     AddShortcut({VShortcutAction::ZoomOut, KeyBindingsToStringList(QKeySequence::ZoomOut), {}});
     AddShortcut({VShortcutAction::ZoomOriginal,
@@ -170,7 +180,6 @@ VValentinaShortcutManager::VValentinaShortcutManager(QObject *parent)
     AddShortcut({VShortcutAction::ToolMidpoint, {}, {}});
     AddShortcut({VShortcutAction::ExportTemplates, {}, {}});
     AddShortcut({VShortcutAction::ExportImage, {}, {}});
-    AddShortcut({VShortcutAction::ExportDrawAs, {}, {}});
     AddShortcut({VShortcutAction::ExportDetailsAs, {}, {}});
     AddShortcut({VShortcutAction::ToolEllipticalArc, {}, {}});
     AddShortcut({VShortcutAction::ToolInsertNode, {}, {}});

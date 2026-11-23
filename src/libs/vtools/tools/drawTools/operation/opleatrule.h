@@ -122,7 +122,8 @@ enum class OPleatFailure : int
     UnresolvedEdge,  ///< an end has a cap but no edge to follow: the user has to designate one
     EdgeAlongFold,   ///< an edge runs along the fold line: it never meets it, so no cap can be built there
     NotchOffEdge,    ///< a notch falls past the end of the edge it should mark: the edge is shorter than the value
-    SplitDeparture   ///< two departure lines share a point: the folds do not carry that line together, so its cap has no axis
+    SplitDeparture,  ///< two departure lines share a point: the folds do not carry that line together, so its cap has no axis
+    EmptyRegion      ///< a point of a departure line is not part of the selected contour: the pleat would take nothing
 };
 
 /** @brief What a refusal means, in the words the user reads.
@@ -194,6 +195,16 @@ struct OPleatMark
 
     /** @brief The curve the edge was read on, or NULL_ID when a line carries it. */
     quint32 edgeId{NULL_ID};
+
+    /** @brief The way the edge was read on it: the direction, from the point of the departure line, that chose
+     *  **which piece** of a path carries the edge.
+     *
+     *  A path of cubic beziers answers with the same tangent at its node as the two pieces it was cut into, so the
+     *  direction is the only thing that says which piece the cap was measured on — and the figure has to cut that
+     *  very piece. Without it, `OPleatCapRule::Sides` asked the path again with no direction at all and took the
+     *  piece it met first: the cap of one sense was then drawn for the other, and the length the plan had measured
+     *  fell on a piece it did not belong to. */
+    QPointF inward{};
 
     /** @brief Where the apex falls on that curve, measured from its start the way the cut tools measure. */
     qreal length{0.};

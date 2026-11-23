@@ -26,6 +26,8 @@
  *************************************************************************/
 
 #include "DialogManageMeasurements.h"
+#include <QDir>
+#include "../../../libs/vmisc/vabstractvalapplication.h"
 #include "vtheme.h"
 #include "vabstractapplication.h"
 #include "vcommonsettings.h"
@@ -254,11 +256,14 @@ void DialogManageMeasurements::SetupUI()
             if (!dstPath.isEmpty())
             {
                 if (QFile::copy(path, dstPath))
-                    QMessageBox::information(this, tr("Export successful"),
-                        tr("File exported to:\n%1").arg(dstPath));
+                    // Modal window with no status area of its own: the box is the only place the reader can see
+                    // that the copy landed.
+                    QMessageBox::information(this, tr("Export successful"), tr("File exported to:\n%1").arg(dstPath));
                 else
                     QMessageBox::warning(this, tr("Export error"),
-                        tr("Could not copy file to the selected destination."));
+                                         tr("Ostara could not copy this table to:\n%1\n\nCheck that the folder "
+                                            "allows writing, and that a file of that name is not already there.")
+                                             .arg(QDir::toNativeSeparators(dstPath)));
             }
             break;
         }
@@ -281,7 +286,9 @@ void DialogManageMeasurements::SetupUI()
                 }
                 else
                 {
-                    QMessageBox::warning(this, tr("Error"), tr("Could not delete the file."));
+                    QMessageBox::warning(this, tr("Measurement table"),
+                                     tr("Ostara could not delete this file:\n%1\n\nIt may be open in another program, "
+                        "or the folder may not allow deleting.").arg(QDir::toNativeSeparators(path)));
                 }
             }
             break;

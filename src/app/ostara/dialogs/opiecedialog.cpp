@@ -32,6 +32,7 @@
 #include "opiecedialog_patternstep.h"
 #include "opiecedialog_piecestep.h"
 #include "../vtools/visualization/path/vistoolpiece.h"
+#include "vwidgets/odialogfit.h"
 #include "../vmisc/def.h"
 #include "../vmisc/vabstractvalapplication.h"
 #include "../vmisc/vcommonsettings.h"
@@ -60,7 +61,7 @@ OPieceDialog::OPieceDialog(const VContainer *data, VAbstractPattern *doc, quint3
 
     m_stack = new QStackedWidget(this);
     m_patternStep = new OPiecePatternStep(m_doc);
-    m_pieceStep = new OPiecePieceStep();
+    m_pieceStep = new OPiecePieceStep(m_doc);
     m_stack->addWidget(m_patternStep);
     m_stack->addWidget(m_pieceStep);
     m_stack->setCurrentWidget(m_pieceStep); // mono-step by default; ShowDialog picks the page
@@ -85,6 +86,9 @@ OPieceDialog::OPieceDialog(const VContainer *data, VAbstractPattern *doc, quint3
     mainLayout->addWidget(m_stack);
     mainLayout->addLayout(buttonRow);
 
+    // The versions are named one page earlier: the piece page must show what was just added.
+    connect(m_patternStep, &OPiecePatternStep::VersionsChanged, m_pieceStep, &OPiecePieceStep::RefreshVersions);
+
     connect(m_cancelButton, &QPushButton::clicked, this, &DialogTool::DialogRejected);
     connect(m_nextButton, &QPushButton::clicked, this, &OPieceDialog::OnPatternNext);
     connect(m_okButton, &QPushButton::clicked, this, &OPieceDialog::DialogAccepted);
@@ -107,27 +111,11 @@ void OPieceDialog::showEvent(QShowEvent *event)
 //---------------------------------------------------------------------------------------------------------------------
 void OPieceDialog::KeepOnScreen()
 {
-    const QScreen *current = screen();
-    if (current == nullptr)
-    {
-        return;
-    }
-
-    const QRect available = current->availableGeometry();
-    const int margin = 20;
-
-    if (height() > available.height() - 2 * margin)
-    {
-        resize(width(), available.height() - 2 * margin);
-    }
-
-    // Centred on the screen rather than pushed up until it fits: a dialogue on the bottom edge is as unusable
-    // as one under it.
-    const QRect frame = frameGeometry();
-    const QPoint clientOffset = pos() - frame.topLeft();
-    const QPoint target
-        = available.center() - QPoint(frame.width() / 2, frame.height() / 2) + clientOffset;
-    move(target);
+    // The dialogue used to re-centre itself here, unconditionally, and again 150 ms after every show:
+    // on X11 and Wayland a client that moves itself during a drag makes the window manager cancel the
+    // drag, so the frame came back under the cursor and the dialogue could not be moved at all. It is
+    // now brought back only when it is not wholly visible — see ODialogFit::KeepOnScreen.
+    ODialogFit::KeepOnScreen(this);
 }
 
 
@@ -271,6 +259,7 @@ auto OPieceDialog::GetPiece() const -> VPiece
     // empty name while the contour is being collected.
     piece.SetName(m_pieceStep->GetPieceName());
     piece.SetPieceNumber(m_pieceStep->GetPieceNumber());
+    piece.SetPatternVersion(m_pieceStep->GetPatternVersion());
     piece.SetCutFabricQty(m_pieceStep->GetCutFabricQty());
     piece.SetCutFabricOnFold(m_pieceStep->IsCutFabricOnFold());
     piece.SetCutInterfacingQty(m_pieceStep->GetCutInterfacingQty());
@@ -341,6 +330,7 @@ void OPieceDialog::OnPatternNext()
     // Pattern fields are committed on acceptance (DialogAccepted), not here:
     // Next alone must not leave the document modified if the user then cancels.
     m_patternCommitted = true;
+    m_pieceStep->RefreshVersions();
     m_stack->setCurrentWidget(m_pieceStep);
     UpdateButtons();
 }

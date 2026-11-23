@@ -504,6 +504,10 @@ auto OExportModeDialog::CurrentRequest() const -> OExportRunRequest
         request.baseC = m_projectorWidget->DimensionBase(2);
         request.gapMm = m_projectorWidget->GapMm();
         request.marginMm = m_projectorWidget->EdgeMarginMm();
+        // **Le seul réglage de la recherche de largeur** : il ne change pas le plafond, il change
+        // l'ordre des paliers et le critère du gagnant. Il part avec la requête, donc il est
+        // enregistré dans le favori et écrit dans la recette comme le reste.
+        request.pageShape = m_projectorWidget->PageShape();
         request.format = OExportFormat::Kind::Projector;
 
         return request;
@@ -519,6 +523,9 @@ auto OExportModeDialog::CurrentRequest() const -> OExportRunRequest
     request.marginMm = m_printWidget->MarginMm();
     request.gapMm = m_printWidget->GapMm();
     request.printModelToken = m_printWidget->PrintModelToken();
+    request.maxPageLengthMm = m_printWidget->MaxPageLengthMm();
+    request.trimSideMargins = m_printWidget->TrimSideMargins();
+    request.documentLandscape = m_printWidget->DocumentLandscape();
     request.columns = m_printWidget->Columns();
     request.frameHeightMm = m_printWidget->FrameHeightMm();
     request.marksTemplateName = m_printWidget->MarksTemplateName();

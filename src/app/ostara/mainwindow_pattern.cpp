@@ -967,7 +967,9 @@ auto MainWindow::InsertLibraryPiece(const QString &filePath) -> bool
     {
         // The wait window is application-modal: let it go before the warning, or the two would stack.
         waitDialog.reset();
-        QMessageBox::warning(this, tr("Piece library"), tr("This piece holds no block to insert."));
+        QMessageBox::warning(this, tr("Piece library"),
+                             tr("This piece holds no block to insert. Open the pattern it was built from, save the "
+                                "piece again from there, then import it."));
         return false;
     }
 
@@ -1004,7 +1006,7 @@ void MainWindow::ActionShowMainPath_triggered(bool checked)
     VAbstractValApplication::VApp()->ValentinaSettings()->SetPieceShowMainPath(checked);
     const QList<quint32> ids = pattern->DataPieces()->keys();
     const bool updateChildren = false;
-    QGuiApplication::setOverrideCursor(QCursor(Qt::WaitCursor));
+    QGuiApplication::setOverrideCursor(QCursor(WaitCursorShape()));
     for (const auto &id : ids)
     {
         try
@@ -1026,7 +1028,7 @@ void MainWindow::ActionBoundaryTogetherWithNotches_triggered(bool checked)
     VAbstractValApplication::VApp()->ValentinaSettings()->SetBoundaryTogetherWithNotches(checked);
     const QList<quint32> ids = pattern->DataPieces()->keys();
     const bool updateChildren = false;
-    QGuiApplication::setOverrideCursor(QCursor(Qt::WaitCursor));
+    QGuiApplication::setOverrideCursor(QCursor(WaitCursorShape()));
     for (const auto &id : ids)
     {
         try

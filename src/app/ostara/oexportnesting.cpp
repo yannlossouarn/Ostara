@@ -38,6 +38,7 @@
 #include "nesting/CuttingRules.h"
 #include "nesting/Engine.h"
 #include "nesting/Footprint.h"
+#include "nesting/PageRepack.h"
 #include "nesting/TiledEngine.h"
 
 #include "../vmisc/def.h"
@@ -55,6 +56,11 @@ namespace
 /// The engine works in fixed-point: one pixel is kTrameScale units. Every
 /// coordinate handed to it, and every coordinate it returns, uses that scale.
 constexpr double kTrameScale = 1e6;
+
+/// La « feuille » d'un plan roulé donné au moteur tuilé : plus haute que tout plan possible, donc
+/// jamais atteinte, et le moteur n'ouvre pas de rangée. 1e6 px font 264 km — et le fixe suit
+/// (1e12), très loin des 9,2e18 d'un int64.
+constexpr double kOpenSheetPx = 1.0e6;
 
 /// Le centième de pixel d'indulgence des comparaisons de largeur : une somme juste à l'arrondi
 /// près ne doit pas fermer la porte au double bord, ni faire échouer un déplacement qui tient.
@@ -147,15 +153,14 @@ auto ToExportPlacements(const std::vector<Placement> &placements,
 /// of the bin model, and the count is read off the placements by the one
 /// function that counts them. Trame is asked for two plans and told nothing
 /// about pages — it is here, and only here, that they are compared.
-auto PrintedSheets(const QVector<OExportPlacement> &placements,
-                   double usedHeightPx, const OExportNestingParams &params) -> int
+auto PrintedSheetsFor(const QVector<OExportPlacement> &placements, double usedHeightPx,
+                      double binWidthPx, double sheetHeightPx, int columns,
+                      const OExportNestingParams &params) -> int
 {
     const double mmPerPx = 1.0 / ToPixel(1.0, Unit::Mm);
 
-    const OExportArtboards::Grid grid =
-        OExportArtboards::Compute(params.binWidthPx, usedHeightPx,
-                                  params.artboardHeightPx * mmPerPx,
-                                  params.artboardCount);
+    const OExportArtboards::Grid grid = OExportArtboards::Compute(
+        binWidthPx, usedHeightPx, sheetHeightPx * mmPerPx, columns);
 
     if (!grid.valid)
     {
@@ -166,6 +171,15 @@ auto PrintedSheets(const QVector<OExportPlacement> &placements,
     // for both candidate plans: it is therefore a constant in the comparison below, and the engine's
     // choice can only move through the placements — which is what it is there for.
     return OExportSheets::Compute(grid, placements, params.coverZonePx).count;
+}
+
+/// The same count, on the sheet the RUN was asked for — the shape every caller that has no second
+/// candidate needs.
+auto PrintedSheets(const QVector<OExportPlacement> &placements,
+                   double usedHeightPx, const OExportNestingParams &params) -> int
+{
+    return PrintedSheetsFor(placements, usedHeightPx, params.binWidthPx, params.artboardHeightPx,
+                            params.artboardCount, params);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -338,7 +352,6 @@ auto ConstraintsFor(const QVector<PieceTalk> &talks, const std::vector<int> &ran
     return out;
 }
 
-
 /// Le message d'un plan qui ne rentre pas — **et il a désormais deux causes, dont une seule est
 /// nommée par le moteur.**
 ///
@@ -346,47 +359,241 @@ auto ConstraintsFor(const QVector<PieceTalk> &talks, const std::vector<int> &ran
 /// soit. Le moteur a raison de dire « ça ne rentre pas » : il ignore qu'un espace a été demandé.
 /// L'appelant, lui, le sait — d'où cette phrase, écrite ici une fois pour les deux chemins. Sans
 /// elle, la seule piste laissée à l'utilisatrice est sa laize, qui n'y est pour rien.
-/// The keys of the pieces the engine could not place — see TooNarrowError.
-template <typename Keys, typename Placements>
-auto RefusedKeys(const Keys &keys, const Placements &placements) -> QStringList
+
+/// What a refused plan has to say, gathered where the geometry is still at hand.
+///
+/// **The pieces that cannot fit and the pieces the search never reached are two different things**,
+/// and the engine reports both the same way: every placement left at its `-1` sentinel. It stops at
+/// the FIRST piece it cannot lay out, so the ones after it were never tried — listing them as
+/// "refused" tells the user thirteen pieces are impossible when one is.
+struct TooNarrowFacts
 {
-    QStringList refused;
-    auto piece = placements.begin();
-    for (auto key = keys.begin(); key != keys.end() && piece != placements.end(); ++key, ++piece)
+    QStringList tooWide{};   ///< "Name (93,5 cm)" — wider than the usable width, at every angle
+    QString stoppedAt{};     ///< the first piece the search could not place
+    double usablePx{0.0};    ///< the document width minus its two side margins
+};
+
+/// The pieces a CLOSED sheet cannot hold, by name — empty when every piece fits one.
+///
+/// **A fact of the geometry, asked before the first engine runs.** The A0 sheet is not assembled:
+/// a piece lying on two sheets could not be printed, so a piece larger than one sheet has no plan
+/// at all. `TiledEngine` would refuse it too — it marks the piece unplaced — but only after a full
+/// sweep, and through a message about a plan that does not fit. The user gets the reason instead,
+/// and the pieces it is about.
+///
+/// The four quarter turns are tried, because that is what the engine tries: a piece may fit a sheet
+/// lying down where it does not fit standing up.
+auto TooBigForOneSheet(const OExportNestingParams &params,
+                       const std::vector<Clipper2Lib::Path64> &polygons,
+                       const std::vector<QString> &names) -> QStringList
+{
+    const double sheetWidthPx =
+        params.artboardCount > 0 ? params.binWidthPx / params.artboardCount : 0.0;
+    const double usableW = sheetWidthPx - 2.0 * params.marginPx;
+    const double usableH = params.artboardHeightPx - 2.0 * params.marginPx;
+
+    const int64_t maxW = static_cast<int64_t>(std::floor(usableW * kTrameScale));
+    const int64_t maxH = static_cast<int64_t>(std::floor(usableH * kTrameScale));
+
+    QStringList tooBig;
+    const std::size_t count = std::min(polygons.size(), names.size());
+    for (std::size_t i = 0; i < count; ++i)
     {
-        if (piece->rotation < 0.0)
+        const BBox box = NestGeom::bboxFromPath(polygons.at(i));
+        const int64_t w = box.xMax - box.xMin;
+        const int64_t h = box.yMax - box.yMin;
+        if ((w <= maxW && h <= maxH) || (h <= maxW && w <= maxH))
         {
-            refused.append(*key);
+            continue;
         }
+        tooBig << names.at(i);
     }
-    refused.removeDuplicates();
-    return refused;
+    return tooBig;
 }
 
-auto TooNarrowError(const OExportNestingParams &params, const QStringList &refused) -> QString
+/// The rectangle a placement actually OCCUPIES on the plan — outline turned, then moved.
+///
+/// `OExportPlacement::origin`/`extent` are the FOOTPRINT's, unrotated (see their note): they say what
+/// the engine reserved, not what the paper carries. The drawn rectangle is the corner list of that
+/// box turned by the placement's angle about the engine's own convention — `x·cos − y·sin`,
+/// `x·sin + y·cos`, the one `NestGeom::rotatePath` applies — then moved by (x, y).
+///
+/// It is the box AROUND the outline, never the outline: a curved piece kept whole in a sheet has its
+/// box in the sheet too, so the test below is stricter than the truth and never looser.
+auto DrawnRect(const OExportPlacement &piece) -> QRectF
 {
-    // ⚠️ **Le nom, et pas seulement le constat.** « Ça ne rentre pas » laisse deux causes possibles —
-    // une laize, ou un espace depuis les bords — et aucune façon de les distinguer : les pièces sont
-    // toutes plus étroites que la laize, et pourtant le moteur en refuse une. Sans le nom, on cherche
-    // dans la géométrie au hasard ; avec lui, on sait en une seconde si la pièce refusée est bien
-    // celle qu'on croit, ou si le bac qui la reçoit n'a pas la largeur qu'on imagine.
-    const QString who = refused.isEmpty()
-                            ? QString()
-                            : QObject::tr(" Refused: %1.").arg(refused.join(QStringLiteral(", ")));
+    const double rad = piece.rotation * M_PI / 180.0;
+    const double c = std::cos(rad);
+    const double s = std::sin(rad);
 
-    if (params.marginPx > 0.0)
+    const double corners[4][2] = {{0.0, 0.0},
+                                  {piece.extentX, 0.0},
+                                  {piece.extentX, piece.extentY},
+                                  {0.0, piece.extentY}};
+
+    double minX = 0.0;
+    double minY = 0.0;
+    double maxX = 0.0;
+    double maxY = 0.0;
+    bool first = true;
+    for (const auto &corner : corners)
     {
-        return QObject::tr("The document is too narrow: some pieces could not be placed. "
-                           "The space kept from the fabric's edges may be what leaves too little "
-                           "room.")
-               + who;
+        const double x = piece.x + corner[0] * c - corner[1] * s;
+        const double y = piece.y + corner[0] * s + corner[1] * c;
+        if (first)
+        {
+            minX = maxX = x;
+            minY = maxY = y;
+            first = false;
+            continue;
+        }
+        minX = std::min(minX, x);
+        maxX = std::max(maxX, x);
+        minY = std::min(minY, y);
+        maxY = std::max(maxY, y);
+    }
+    return QRectF(minX, minY, maxX - minX, maxY - minY);
+}
+
+/// @brief Whether every piece lies WHOLLY inside one sheet, at the margin from its four edges.
+///
+/// C'est ce qui rend un plan de BANDE imprimable sur un format à feuilles fermées. Le moteur de bande
+/// ne connaît pas les feuilles : il peut poser une pièce à cheval, et ce plan-là ne s'imprime pas. Un
+/// plan qui passe ce test, lui, s'imprime — et il arrive avec le recuit et les rotations à 2°, que le
+/// moteur tuilé n'a pas.
+///
+/// La tolérance est le pixel unique que tout le reste de l'export s'accorde : une position posée au
+/// contact exact d'une marge n'est pas un cheval.
+auto SheetClean(const QVector<OExportPlacement> &plan, const OExportNestingParams &params) -> bool
+{
+    const qreal cellW = params.artboardCount > 0 ? params.binWidthPx / params.artboardCount : 0.0;
+    const qreal cellH = params.artboardHeightPx;
+    if (cellW <= 0.0 || cellH <= 0.0)
+    {
+        return false;
     }
 
-    return QObject::tr("The document is too narrow: some pieces could not be placed.") + who
-           + QObject::tr(" Usable width: %1 cm, cloth %2 cm, margin %3 cm.")
-                 .arg((params.binWidthPx - params.marginPx) / ToPixel(10.0, Unit::Mm), 0, 'f', 1)
-                 .arg(params.binWidthPx / ToPixel(10.0, Unit::Mm), 0, 'f', 1)
-                 .arg(params.marginPx / ToPixel(10.0, Unit::Mm), 0, 'f', 1);
+    constexpr qreal kTolerancePx = 1.0;
+
+    for (const OExportPlacement &piece : plan)
+    {
+        const QRectF box = DrawnRect(piece);
+
+        // La feuille où la pièce se tient, lue sur son coin : une pièce à cheval tombe dans une
+        // feuille, puis déborde de l'une de ses quatre bornes.
+        const int col = static_cast<int>(std::floor((box.left() - params.marginPx) / cellW + 1e-9));
+        const int row = static_cast<int>(std::floor((box.top() - params.marginPx) / cellH + 1e-9));
+
+        const qreal left = col * cellW + params.marginPx;
+        const qreal top = row * cellH + params.marginPx;
+        const qreal right = (col + 1) * cellW - params.marginPx;
+        const qreal bottom = (row + 1) * cellH - params.marginPx;
+
+        if (box.left() < left - kTolerancePx || box.right() > right + kTolerancePx
+            || box.top() < top - kTolerancePx || box.bottom() > bottom + kTolerancePx)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The refusal that goes with the facts above.
+auto TooBigError(const QStringList &pieces) -> QString
+{
+    return QObject::tr("These pieces are larger than one sheet of this format: %1. "
+                       "A sheet is printed whole, so a piece that did not fit on one could not "
+                       "be printed at all.")
+        .arg(pieces.join(QStringLiteral(", ")));
+}
+
+/// Gathers those facts from the engine's own answer, using the narrowest width of each piece — the
+/// same measure the engine uses to decide whether it fits, so the two cannot disagree.
+auto TooNarrowFactsOf(const OExportNestingParams &params,
+                      const std::vector<Clipper2Lib::Path64> &polygons,
+                      const std::vector<std::vector<double>> &angles,
+                      const std::vector<Placement> &placements,
+                      const QStringList &names) -> TooNarrowFacts
+{
+    TooNarrowFacts facts;
+    facts.usablePx = params.binWidthPx - 2.0 * params.marginPx;
+
+    const qsizetype count = std::min<qsizetype>(
+        {static_cast<qsizetype>(placements.size()), static_cast<qsizetype>(polygons.size()),
+         static_cast<qsizetype>(names.size())});
+
+    for (qsizetype i = 0; i < count; ++i)
+    {
+        if (placements.at(static_cast<std::size_t>(i)).rotation >= 0.0)
+        {
+            continue; // placed
+        }
+
+        // ⚠️ **Les angles du moteur, pas ceux de la contrainte.** Une impression ne contraint
+        // aucune rotation : le moteur reçoit une liste vide et tourne la pièce dans ses 180
+        // orientations. Lire la largeur sur une liste vide la donnait à 0°, et le message accusait
+        // une pièce qui passe très bien couchée (`Bas Robe Devant`, 109,9 cm à 0° pour 38,1 cm
+        // couché). On mesure donc ce que le moteur, lui, essaiera.
+        std::vector<double> pieceAngles = i < static_cast<qsizetype>(angles.size())
+                                              ? angles.at(static_cast<std::size_t>(i))
+                                              : std::vector<double>{};
+        if (pieceAngles.empty())
+        {
+            for (int a = 0; a < 360; a += 2)
+            {
+                pieceAngles.push_back(static_cast<double>(a));
+            }
+        }
+
+        const double width = NarrowestWidth(polygons.at(static_cast<std::size_t>(i)), pieceAngles);
+        if (width > facts.usablePx)
+        {
+            facts.tooWide.append(QStringLiteral("%1 (%2 cm)")
+                                     .arg(names.at(i))
+                                     .arg(width / ToPixel(10.0, Unit::Mm), 0, 'f', 1));
+        }
+
+        if (facts.stoppedAt.isEmpty())
+        {
+            facts.stoppedAt = names.at(i);
+        }
+    }
+
+    return facts;
+}
+
+auto TooNarrowError(const OExportNestingParams &params, const TooNarrowFacts &facts) -> QString
+{
+    const qreal toCm = ToPixel(10.0, Unit::Mm);
+    // Le mot suit ce sur quoi les pièces sont posées : le papier d'une impression, le tissu d'un plan
+    // de coupe. Voir OExportNestingParams::printRun.
+    const QString support = params.printRun ? QObject::tr("the paper") : QObject::tr("the cloth");
+
+    QString message;
+    if (!facts.tooWide.isEmpty())
+    {
+        // Le cas qui se répare en changeant de laize ou de rouleau — et il nomme le SURPLUS, pas
+        // seulement le refus : c'est la seule chose à comparer avec le papier qu'on a.
+        message = QObject::tr("These pieces do not fit across the document: %1.")
+                      .arg(facts.tooWide.join(QStringLiteral(", ")));
+    }
+    else
+    {
+        // Aucune n'est trop large : c'est l'arrangement qui n'a pas trouvé sa place. On le dit
+        // ainsi, et on nomme la pièce où la recherche s'est arrêtée.
+        message = QObject::tr("The plan does not fit across the document. The layout stopped at %1; "
+                              "the pieces before it are placed, the ones after it were not tried.")
+                      .arg(facts.stoppedAt.isEmpty() ? QObject::tr("no piece") : facts.stoppedAt);
+    }
+
+    message += QLatin1Char('\n')
+               + QObject::tr("Usable width: %1 cm on %2 — document %3 cm, margin %4 cm.")
+                     .arg(facts.usablePx / toCm, 0, 'f', 1)
+                     .arg(support)
+                     .arg(params.binWidthPx / toCm, 0, 'f', 1)
+                     .arg(params.marginPx / toCm, 0, 'f', 1);
+
+    return message;
 }
 
 /// Nidifie les rangs d'un plan dans un bac de largeur @p widthPx.
@@ -439,24 +646,15 @@ auto NestRanks(const Footprint::Result &footprint, const std::vector<ZoneConstra
         // The names, read through the ranks: this path holds the footprint the engine was given, and
         // a rank is what points back at a key. Without them the message says "some pieces" — and the
         // one thing the user needs is which.
-        QStringList refused;
-        auto piece = plan->placements.begin();
-        for (auto rank = plan->ranks.begin();
-             rank != plan->ranks.end() && piece != plan->placements.end(); ++rank, ++piece)
+        QStringList names;
+        names.reserve(static_cast<qsizetype>(plan->ranks.size()));
+        for (const int rank : plan->ranks)
         {
-            if (piece->rotation >= 0.0)
-            {
-                continue;
-            }
-            auto key = footprint.keys.begin() + static_cast<std::ptrdiff_t>(*rank);
-            if (key != footprint.keys.end())
-            {
-                refused.append(*key);
-            }
+            names.append(footprint.keys.at(static_cast<std::size_t>(rank)));
         }
-        refused.removeDuplicates();
 
-        *error = TooNarrowError(params, refused);
+        *error = TooNarrowError(params,
+                                TooNarrowFactsOf(params, plan->polygons, angles, plan->placements, names));
         return false;
     }
 
@@ -1104,7 +1302,6 @@ auto PlanFoldedFabric(const Footprint::Result &footprint, const QVector<PieceTal
         }
     }
 
-
     // ── La sortie ────────────────────────────────────────────────────────────────────────────
     placements->clear();
     orderedRanks->clear();
@@ -1560,6 +1757,22 @@ auto OExportNesting::Run(const QVector<OExportSizeLayer> &layers, const OExportN
         return result;
     }
 
+    // ── Feuilles fermées : une pièce plus grande qu'une feuille n'a aucun plan ──
+    //
+    // Refusé ICI, avant les moteurs : c'est une impossibilité de la géométrie, pas un arrangement
+    // que la recherche aurait manqué, et l'utilisatrice n'a pas à attendre un plan qui ne peut pas
+    // exister pour apprendre quelles pièces sont en cause. Voir TooBigForOneSheet.
+
+    if (params.closedSheets)
+    {
+        const QStringList tooBig = TooBigForOneSheet(params, footprint.polygons, footprint.keys);
+        if (!tooBig.isEmpty())
+        {
+            result.error = TooBigError(tooBig);
+            return result;
+        }
+    }
+
     // Fixed width, unbounded height: the height is what the nesting produces.
     //
     // The margin and the gap arrive already in pixels, like the width and the polygons:
@@ -1652,10 +1865,26 @@ auto OExportNesting::Run(const QVector<OExportSizeLayer> &layers, const OExportN
         }
     }
 
+    // ── Le moteur de bande, sauf sur des feuilles fermées ────────────────────────────────────
+    //
+    // Sur A0, son plan n'est pas imprimable par construction (il ne connaît pas les feuilles), et on
+    // ne le lui demandait que pour le laisser concourir « au cas où il serait propre » : il ne l'a
+    // jamais été sur les patrons mesurés, et c'est le poste le plus cher du run — un recuit, sans
+    // budget de temps dans ce dépôt. Mesuré le 07-11-2026 : 6,4 s pour 24 pièces, et bien davantage
+    // à mesure que le patron grossit. Le moteur tuilé pose donc A0 seul, et c'est son plan qui part.
     const Engine engine{config};
     bool abandoned = false;
     std::vector<Placement> placements =
-        engine.place(bin, footprint.polygons, allowedAngles, {}, &abandoned);
+        params.closedSheets
+            ? std::vector<Placement>(footprint.polygons.size())
+            : engine.place(bin, footprint.polygons, allowedAngles, {}, &abandoned);
+    if (params.closedSheets)
+    {
+        for (Placement &pl : placements)
+        {
+            pl.rotation = -1.0; // aucune pièce posée : c'est le moteur tuilé qui les posera
+        }
+    }
 
     if (abandoned)
     {
@@ -1679,9 +1908,18 @@ auto OExportNesting::Run(const QVector<OExportSizeLayer> &layers, const OExportN
 
     // The engine marks an unplaced piece with a negative rotation and reports
     // nothing else — no status, no exception.
-    if (!AllPlaced(placements))
+    //
+    // ⚠️ **Sauf sur des feuilles fermées, où le moteur de bande n'a pas tourné du tout.** Depuis
+    // qu'il est écarté de ce chemin (07-11-2026 : un plan de bande traverse les lignes de coupe par
+    // construction, il n'y concourt jamais), `placements` est vide PAR CONSTRUCTION — et
+    // `AllPlaced` répondait donc faux sur un plan qui n'existe pas. Le run s'arrêtait ICI, avant
+    // d'avoir demandé quoi que ce soit au moteur tuilé : c'est le refus « le plan ne tient pas dans
+    // la largeur » vu sur A0, qui accusait une pièce que le moteur tuilé aurait posée. Le refus
+    // n'appartient qu'au moteur de bande ; le cas « aucun plan du tout » est traité plus bas.
+    if (!params.closedSheets && !AllPlaced(placements))
     {
-        result.error = TooNarrowError(params, RefusedKeys(result.keys, placements));
+        result.error = TooNarrowError(
+            params, TooNarrowFactsOf(params, footprint.polygons, allowedAngles, placements, result.keys));
         return result;
     }
 
@@ -1715,6 +1953,8 @@ auto OExportNesting::Run(const QVector<OExportSizeLayer> &layers, const OExportN
         spec.sheetHeight   = params.artboardHeightPx;
         spec.gap           = params.gapPx;
         spec.allowRotation = true;
+        // Le format A0 : aucune pièce à cheval sur deux feuilles. Voir OExportNestingParams.
+        spec.closedSheets  = params.closedSheets;
         // The second engine is asked the same question as the first, and for the same reason: a
         // run given up during the tiled pass has to stop there too.
         spec.abandoned     = params.abandoned;
@@ -1738,39 +1978,240 @@ auto OExportNesting::Run(const QVector<OExportSizeLayer> &layers, const OExportN
 
         const QVector<OExportPlacement> stripPlan =
             ToExportPlacements(placements, footprint.polygons);
-        int bestSheets = PrintedSheets(
-            stripPlan, Engine::UsedHeight(placements, footprint.polygons, bin), params);
+        // **Le plan de bande ne concourt que s'il est IMPRIMABLE.** Il ne connaît pas les feuilles :
+        // rien ne l'empêche de poser une pièce à cheval, et ce plan-là ne s'imprime pas sur un format
+        // à feuilles fermées. Quand il est propre, il concourt comme les autres — et il arrive avec
+        // le RECUIT et les rotations à 2°, que le moteur tuilé n'a pas.
+        //
+        // À égalité de feuilles, c'est donc lui qui reste : `tiledSheets < bestSheets` est strict.
+        // Ce n'est pas une faveur, c'est la seule comparaison que les deux plans admettent — le
+        // critère de Sophie est le nombre de feuilles, et à feuilles égales le plan le plus fin est
+        // le meilleur.
+        // Sur des feuilles fermées il n'y a plus de plan de bande du tout (voir plus haut) : le
+        // candidat « bande » n'existe donc pas, et un plan vide ne doit surtout pas gagner — il
+        // ferait ZÉRO feuille.
+        const bool stripPrintable = !params.closedSheets && SheetClean(stripPlan, params);
+        int bestSheets = stripPrintable ? PrintedSheets(stripPlan,
+                                                       Engine::UsedHeight(placements,
+                                                                          footprint.polygons, bin),
+                                                       params)
+                                        : std::numeric_limits<int>::max();
+        bool tiledChosen = false;
 
-        for (const TiledEngine::Spec::Order order : orders)
+        // ── LA FEUILLE, DANS LE SENS DEMANDÉ — ET LUI SEUL ─────────────────────────────────────
+        //
+        // ⚠️ **Le sens n'est plus arbitré : il est DEMANDÉ.** Le nesting demandait autrefois les deux
+        // plans et gardait celui qui imprimait le moins de pages. C'était juste tant que la page
+        // était le seul enjeu ; ça ne l'est plus depuis que l'utilisatrice choisit le sens de sa
+        // liasse — et surtout, un plan tourné après coup donne des feuilles CÔTE À CÔTE, alors que
+        // des feuilles EMPILÉES (ce qu'elle veut, comme en portrait) exigent un plan nidifié dans
+        // ce sens. Deux mises en page, un seul sens, et c'est celui-là qui est demandé.
+        //
+        // Ce qui ne change pas : à l'intérieur du sens, les trois ordres du moteur tuilé concourent
+        // toujours, et le plan de bande garde son mot à dire quand il est imprimable.
+        struct SheetChoice
         {
-            spec.order = order;
+            bool landscape;
+            double binWidthPx;
+            double sheetHeightPx;
+        };
 
-            bool tiledAbandoned = false;
-            const std::vector<Placement> tiled =
-                TiledEngine(spec).place(bin, footprint.polygons, &tiledAbandoned);
+        std::vector<SheetChoice> sheets;
+        if (params.sheetBothWays && params.landscapeSheet)
+        {
+            // La feuille couchée : sa largeur devient la hauteur, et le bac s'élargit d'autant —
+            // une colonne de feuilles couchées est aussi large que leur long côté.
+            sheets.push_back({true, params.artboardHeightPx * params.artboardCount,
+                              params.binWidthPx / params.artboardCount});
+        }
+        else
+        {
+            sheets.push_back({false, params.binWidthPx, params.artboardHeightPx});
+        }
 
-            if (tiledAbandoned)
+        // **Un seul cache de sommes de non-recouvrement pour tous les plans du run** : les pièces,
+        // le jeu et les orientations sont les mêmes d'un candidat à l'autre, et chaque plan les
+        // recalculait tous. Mesuré le 07-11-2026 sur 24 pièces : 16,7 s pour trois ordres avec un
+        // cache par plan, 8,6 s avec un cache partagé — plans identiques au millimètre.
+        NestGeom::NFPCache sharedNfp;
+
+        for (const SheetChoice &sheet : sheets)
+        {
+            // Le bac de CETTE feuille : même marge, mêmes zones interdites. Le bloc de la page de
+            // garde est aux MÊMES coordonnées dans les deux sens — il se tient au coin du plan, et le
+            // plan dans le sens demandé commence au même coin. Il n'y a donc rien à tourner : c'est
+            // le sens de la feuille qui change, pas la place du bloc.
+            const Bin sheetBin(sheet.binWidthPx, params.marginPx, zones);
+
+            spec.sheetWidth = sheet.binWidthPx / params.artboardCount;
+            spec.sheetHeight = sheet.sheetHeightPx;
+
+            for (const TiledEngine::Spec::Order order : orders)
             {
-                result.abandoned = true;
-                return result;
-            }
+                spec.order = order;
 
-            if (tiled.size() != footprint.polygons.size() || !AllPlaced(tiled))
-            {
-                continue;   // ce départ-là n'a pas su tout poser : il ne concourt pas
-            }
+                bool tiledAbandoned = false;
+                const std::vector<Placement> tiled =
+                    TiledEngine(spec).place(sheetBin, footprint.polygons, &tiledAbandoned, &sharedNfp);
 
-            const int tiledSheets = PrintedSheets(
-                ToExportPlacements(tiled, footprint.polygons),
-                Engine::UsedHeight(tiled, footprint.polygons, bin), params);
+                if (tiledAbandoned)
+                {
+                    result.abandoned = true;
+                    return result;
+                }
 
-            if (tiledSheets < bestSheets)
-            {
-                bestSheets  = tiledSheets;
-                placements  = tiled;
+                if (tiled.size() != footprint.polygons.size() || !AllPlaced(tiled))
+                {
+                    continue;   // ce départ-là n'a pas su tout poser : il ne concourt pas
+                }
+
+                const int tiledSheets = PrintedSheetsFor(
+                    ToExportPlacements(tiled, footprint.polygons),
+                    Engine::UsedHeight(tiled, footprint.polygons, sheetBin), sheet.binWidthPx,
+                    sheet.sheetHeightPx, params.artboardCount, params);
+
+                if (tiledSheets < bestSheets)
+                {
+                    bestSheets  = tiledSheets;
+                    placements  = tiled;
+                    tiledChosen = true;
+                    result.binWidthPx = sheet.binWidthPx;
+                    result.sheetHeightPx = sheet.sheetHeightPx;
+                }
             }
         }
 
+        // Aucun ordre n'a posé toutes les pièces, et le plan de bande n'est pas imprimable : il n'y a
+        // pas de plan. On le dit plutôt que de rendre un plan à cheval.
+        if (params.closedSheets && !tiledChosen && !stripPrintable)
+        {
+            result.error = QObject::tr("The pieces do not fit on the sheets of this format.");
+            return result;
+        }
+    }
+
+    // ── Un roulé n'a qu'une LONGUEUR à perdre, et deux moteurs pour la trouver ──────────────
+    //
+    // Le moteur de bande recuit et tourne au degré ; le moteur tuilé est glouton et ne tourne qu'au
+    // quart de tour, mais il essaie TROIS ordres. Mesuré par Sophie le 07-11-2026 sur un patron
+    // réel : 1 263 mm pour le premier, 1 189 pour le second, mêmes pièces, même largeur — le
+    // glouton gagnait 74 mm.
+    //
+    // Un roulé ne paie que sa longueur, donc on demande les deux et on garde la plus courte : le
+    // plan ne peut pas sortir plus long qu'avant. Et jamais sur un plan de coupe : le moteur tuilé
+    // ne connaît ni les angles par pièce ni l'ancrage au pli, deux choses qu'un plan de coupe doit.
+    if (params.printRun && params.artboardHeightPx <= 0.0 && AllPlaced(placements))
+    {
+        double bestHeight = Engine::UsedHeight(placements, footprint.polygons, bin);
+
+        const TiledEngine::Spec::Order orders[] = {TiledEngine::Spec::Order::HolderArea,
+                                                   TiledEngine::Spec::Order::HolderHeight,
+                                                   TiledEngine::Spec::Order::HolderWidth};
+
+        // **Deux familles de candidats, parce que le glouton dépend de la hauteur de son étagère.**
+        //
+        // 1. la bande OUVERTE — une étagère plus haute que tout plan possible ;
+        // 2. la bande DÉCOUPÉE en étagères hautes comme la feuille ISO de cette largeur
+        //    (largeur × √2 : 841 × 1,414 = 1 189 mm, c'est-à-dire l'A0 exactement). Le glouton pose
+        //    alors comme sur des feuilles A0, et c'est le plan que Sophie comparait : 1 178 mm pour
+        //    celui-là contre 1 263 pour le recuit, mêmes pièces, même largeur.
+        //
+        // Le tracé du 07-11-2026 explique pourquoi les deux : sur son patron, l'étagère OUVERTE donne
+        // 1 812 mm (un glouton sans pression monte), l'étagère ISO 1 178 mm. Sur un autre jeu c'est
+        // l'inverse. On demande donc les deux et on garde le plus court.
+        const struct
+        {
+            bool closed;
+            double sheetHeightPx;
+        } shapes[]{{false, kOpenSheetPx}, {true, params.binWidthPx * std::sqrt(2.0)}};
+
+        // **Un seul cache de sommes de non-recouvrement pour les deux familles** : mêmes pièces,
+        // même jeu, mêmes quarts de tour — le premier plan paie les sommes, les cinq autres les
+        // relisent. Mesuré le 07-11-2026 sur 24 pièces : 16,7 s pour trois plans avec un cache par
+        // plan, 8,6 s avec un cache partagé, plans identiques.
+        NestGeom::NFPCache sharedNfp;
+
+        for (const auto &shape : shapes)
+        {
+            TiledEngine::Spec spec;
+            spec.sheetWidth = params.binWidthPx;
+            spec.sheetHeight = shape.sheetHeightPx;
+            spec.gap = params.gapPx;
+            spec.allowRotation = true;
+            spec.closedSheets = shape.closed;
+            spec.abandoned = params.abandoned;
+
+            for (const TiledEngine::Spec::Order order : orders)
+            {
+                spec.order = order;
+
+                bool greedyAbandoned = false;
+                const std::vector<Placement> greedy =
+                    TiledEngine(spec).place(bin, footprint.polygons, &greedyAbandoned, &sharedNfp);
+
+                if (greedyAbandoned)
+                {
+                    result.abandoned = true;
+                    return result;
+                }
+
+                if (!AllPlaced(greedy))
+                {
+                    continue; // ce départ-là n'a pas su tout poser : il ne concourt pas
+                }
+
+                const double greedyHeight = Engine::UsedHeight(greedy, footprint.polygons, bin);
+
+                if (greedyHeight < bestHeight)
+                {
+                    bestHeight = greedyHeight;
+                    placements = greedy;
+                }
+            }
+        }
+    }
+
+    // ── Les deux passes de fin de run, sur le plan RETENU ────────────────────
+    //
+    // ⚠️ **Après l'arbitrage, et jamais dans un moteur.** Le plan qui gagne n'est pas toujours celui
+    // du moteur tuilé : une passe écrite dans ce moteur-là ne s'exécuterait jamais quand la bande
+    // gagne, et le gain resterait invisible. C'est arrivé, et c'est ce que ce placement corrige.
+    //
+    // 1. le reposage : chaque pièce sur le MOINS de feuilles. Une pièce à cheval sur six feuilles se
+    //    recoupe et se recolle six fois à l'atelier ; la même sur trois, une fois.
+    // 2. l'air : chaque pièce recentrée dans le couloir que les règles lui laissent — deux écarts
+    //    inégaux deviennent deux écarts égaux.
+    //
+    // ⚠️ **Le plan ne peut pas sortir pire de l'une ou de l'autre** : une pièce ne bouge que si elle
+    // touche strictement moins de feuilles (ou si elle se recentre sans en toucher une de plus),
+    // aucune rangée ne s'ouvre, et aucun bord ne s'approche d'une jonction de feuilles. Voir
+    // Modifications/Ostara/ExportMode/Nesting.md §25.
+    // ⚠️ **Et jamais sur des feuilles fermées** : ces deux passes déplacent des pièces sans connaître
+    // la règle des feuilles fermées — une pièce que `Minimize` pousse d'une feuille à l'autre serait
+    // exactement ce que le format interdit. Elles n'ont d'ailleurs rien à y gagner : une pièce y
+    // occupe déjà une seule page, et un bord de feuille y est tenu par la marge, pas par une passe.
+    if (params.artboardHeightPx > 0.0 && params.artboardCount > 0 && !foldedFabricPlan
+        && !params.closedSheets)
+    {
+        const double mmPerPx = 1.0 / ToPixel(1.0, Unit::Mm);
+        const OExportArtboards::Grid grid =
+            OExportArtboards::Compute(params.binWidthPx,
+                                      Engine::UsedHeight(placements, footprint.polygons, bin),
+                                      params.artboardHeightPx * mmPerPx, params.artboardCount);
+
+        if (grid.valid)
+        {
+            PageRepack::Frame repack;
+            repack.cellWidth  = grid.cellWidthPx;
+            repack.cellHeight = grid.cellHeightPx;
+            repack.columns    = grid.columns;
+            repack.rows       = grid.rows;
+            repack.gap        = params.gapPx;
+
+            // Un seul appel : les deux passes ont un ordre obligatoire, et `Refine` est le seul
+            // endroit qui le connaisse.
+            placements = PageRepack::Refine(bin, footprint.polygons, placements, repack);
+        }
     }
 
     result.placements = ToExportPlacements(placements, footprint.polygons);

@@ -29,6 +29,8 @@
  *************************************************************************/
 
 #include "dialogtool.h"
+#include <QMessageBox>
+#include "../vmisc/vabstractvalapplication.h"
 
 #include "../dialogtoolbox.h"
 #include "../vmisc/FactoryWidgets.h"
@@ -131,6 +133,18 @@ void DialogTool::closeEvent(QCloseEvent *event)
 }
 
 //---------------------------------------------------------------------------------------------------------------------
+void DialogTool::RefuseStep(const QString &message)
+{
+    emit ToolTip(message);
+
+    // The window is what the reader wants for a refusal: it stops on the mistake instead of letting the next click
+    // land somewhere unintended. Over the main window, because this dialog is not on screen yet while points are
+    // being picked. The log gets a line too, but without the pane signature: the box already says it.
+    QMessageBox::information(VAbstractValApplication::VApp()->getMainWindow(), windowTitle(), message);
+    qWarning() << message;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
 /**
  * @brief showEvent handle when window show
  * @param event event
@@ -174,7 +188,11 @@ void DialogTool::showEvent(QShowEvent *event)
         }
     }
 
+    // The frame is kept inside the screen by ODialogFit, installed once for the whole application:
+    // one rule, applied to every dialog, rather than a copy of it here. This class only places
+    // itself, which the fit does not do.
     PlaceDialog();
+
 }
 
 //---------------------------------------------------------------------------------------------------------------------
@@ -189,8 +207,13 @@ void DialogTool::PlaceDialog()
     if (const QScreen *screen = this->screen())
     {
         const QRect available = screen->availableGeometry();
-        const int x = available.x() + (available.width() - frameGeometry().width()) / 2;
-        const int y = available.y() + (available.height() - frameGeometry().height()) * 15 / 100;
+        // A dialog as large as the screen has no free space to slide in: the 15 % is taken from what is left,
+        // and a frame wider or taller than the area keeps its top-left corner on the screen instead of hanging
+        // over the edge.
+        const int roomX = qMax(0, available.width() - frameGeometry().width());
+        const int roomY = qMax(0, available.height() - frameGeometry().height());
+        const int x = available.x() + roomX / 2;
+        const int y = available.y() + roomY * 15 / 100;
         move(x, y);
     }
 }

@@ -35,6 +35,7 @@
 #include "../ifc/exception/vexceptionbadid.h"
 #include "../ifc/exception/vexceptionobjecterror.h"
 #include "../ifc/xml/vdomdocument.h"
+#include "../ifc/xml/vpatterngraph.h"
 #include "../ifc/xml/vpatternconverter.h"
 #include "../vmisc/def.h"
 #include "../vmisc/vvalentinasettings.h"
@@ -47,6 +48,8 @@
 #include "vpattern_helpers.h"
 
 #include <QtConcurrentRun>
+
+#include <utility>
 
 using namespace VPatternHelpers;
 
@@ -334,7 +337,12 @@ void VPattern::ParseDetailElement(QDomElement &domElement, const Document &parse
         // Node id of this piece's own copy of the main path point. Read before <nodes> is parsed,
         // so membership of the main path cannot be checked here — it is validated lazily on use.
         initData.detail.SetGradedAlignPointId(GetParametrUInt(domElement, AttrGradedAlignPoint, QChar('0')));
+        initData.detail.SetGradedAlignPointVId(GetParametrUInt(domElement, AttrGradedAlignPointV, QChar('0')));
         initData.detail.SetPieceNumber(GetParametrUInt(domElement, AttrPieceNumber, QChar('0')));
+        // Absent = the "all versions" entry: a piece of a single-version pattern wears no attribute,
+        // and a piece of a multi-version one keeps the entry it was given.
+        initData.detail.SetPatternVersion(
+            GetParametrUInt(domElement, AttrPatternVersion, QString::number(AllVersionsId())));
         initData.detail.SetCutFabricQty(GetParametrInt(domElement, AttrCutFabricQty, QStringLiteral("0")));
         initData.detail.SetCutFabricOnFold(GetParametrBool(domElement, AttrCutFabricOnFold, falseStr));
         initData.detail.SetCutInterfacingQty(GetParametrInt(domElement, AttrCutInterfacingQty, QStringLiteral("0")));
@@ -368,10 +376,49 @@ void VPattern::ParseDetailElement(QDomElement &domElement, const Document &parse
     }
     catch (const VExceptionBadId &e)
     {
-        VExceptionObjectError excep(tr("Error creating or updating detail"), domElement);
-        excep.AddMoreInformation(e.ErrorMessage());
-        throw excep;
+        // **A piece the container cannot rebuild does not take the pattern with it.** The file is all the
+        // user has, and a pattern that refuses to open cannot even be repaired: that is exactly what a union
+        // whose declared objects had been deleted produced — the united piece kept nodes nothing answered
+        // for, and every attempt to open the file ended on "impossible d'analyser le fichier".
+        //
+        // The element is set aside here and leaves once the walk of <details> is over (DropUnbuiltDetails):
+        // removing it right now would detach the node the walk is standing on, nextSibling() would answer
+        // nothing, and every piece written after the broken one would be skipped unread.
+        qWarning() << tr("The piece '%1' could not be rebuilt and was removed from the pattern: %2")
+                          .arg(domElement.attribute(AttrName), e.ErrorMessage());
+        m_unbuiltDetails.append(domElement);
     }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void VPattern::DropUnbuiltDetails()
+{
+    for (const QDomElement &broken : std::as_const(m_unbuiltDetails))
+    {
+        // **The piece entered the container before its build failed.** A piece the container holds without a
+        // tool is a piece every selection path trips over: MainWindow asks getTool() of each of them in turn
+        // (mainwindow.cpp, the ShowDetail handler), getTool() throws on an unknown id, and the throw leaves
+        // through the event loop — the application aborts on the first click, right after opening. So the
+        // half-built entry leaves with its element.
+        const quint32 id = VDomDocument::GetParametrUInt(broken, VDomDocument::AttrId, NULL_ID_STR);
+        if (id != NULL_ID)
+        {
+            data->RemovePiece(id);
+            if (VPatternGraph *graph = PatternGraph(); graph != nullptr)
+            {
+                graph->RemoveVertex(id);
+            }
+            RemoveTool(id);
+        }
+
+        if (QDomNode parent = broken.parentNode(); not parent.isNull())
+        {
+            parent.removeChild(broken);
+            modified = true;
+            haveLiteChange();
+        }
+    }
+    m_unbuiltDetails.clear();
 }
 
 //---------------------------------------------------------------------------------------------------------------------
@@ -593,6 +640,7 @@ auto VPattern::ParsePieceGrainline(const QDomElement &domElement, VGrainlineData
 void VPattern::ParseDetails(const QDomElement &domElement, const Document &parse)
 {
     Q_ASSERT_X(not domElement.isNull(), Q_FUNC_INFO, "domElement is null");
+    m_unbuiltDetails.clear();
     QDomNode domNode = domElement.firstChild();
     while (!domNode.isNull())
     {
@@ -605,6 +653,8 @@ void VPattern::ParseDetails(const QDomElement &domElement, const Document &parse
         }
         domNode = domNode.nextSibling();
     }
+
+    DropUnbuiltDetails();
 
     if (parse == Document::FullParse)
     {

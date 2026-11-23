@@ -127,14 +127,31 @@ public:
     /// @brief How many sheets side by side. Always 1 on a roll, which has no columns.
     auto Columns() const -> int;
 
-    /// @brief The long side of one sheet, in millimetres — the height of the frame the plan
-    ///        is cut into. **0 when there is no frame at all**, and that single figure is
-    ///        what says so: it is the token the canvas reads to decide whether there are
-    ///        sheets to draw.
+    /// @brief La longueur maximale d'une page de rouleau, en millimètres — **zéro veut dire 500 cm**.
     ///
-    /// A roll has no sheet, and the A0 model is never placed side by side — neither is cut,
-    /// so neither has a frame, so both answer zero here.
+    /// Sans objet sur un format tuilé, qui a des feuilles et non une bande : il répond zéro.
+    auto MaxPageLengthMm() const -> qreal;
+
+    /// @brief Exporter le PDF sans les marges droite et gauche — faux sur tout format tuilé.
+    auto TrimSideMargins() const -> bool;
+
+    /// @brief The long side of one sheet, in millimetres — the height of the frame the plan
+    ///        is cut into. **0 when there is no sheet at all**, and that single figure is what
+    ///        says so: it is the token the canvas and the PDF read to decide whether there is a
+    ///        grid to draw.
+    ///
+    /// A roll is the only format that answers zero. The A0 sheet has a sheet like the others —
+    /// what it has not is a decor, and that is `hasDecor`'s business, not this figure's.
     auto FrameHeightMm() const -> qreal;
+
+    /// Le sens dans lequel le document doit SORTIR — portrait quand la ligne n'est pas montrée.
+    ///
+    /// **C'est un choix de nidification**, pas une rotation : le plan est cherché dans ce sens-là, et
+    /// les feuilles s'empilent comme en portrait dans les deux cas. Ce n'est pas une propriété du
+    /// FORMAT — celui-ci dit seulement s'il en admet deux
+    /// (`OExportPrintModel::hasOrientation`) — donc la réponse est tenue par la combo, et nulle part
+    /// ailleurs en double.
+    auto DocumentLandscape() const -> bool;
 
     /// @brief The unit the tab is read in. Stored with the generation so that the figures
     ///        come back in it, rather than in whatever the pattern happens to use.
@@ -198,10 +215,22 @@ private:
 
     QLabel *m_coverLabel{nullptr};
     QComboBox *m_coverCombo{nullptr};
+    QLabel *m_orientationLabel{nullptr};
+    QComboBox *m_orientationCombo{nullptr};
 
     QStackedWidget *m_shapeStack{nullptr};
     OExportRollFormatWidget *m_rollWidget{nullptr};
     OExportTiledFormatWidget *m_tiledWidget{nullptr};
+
+    /// La largeur du rouleau, gardée ici pour survivre à un aller-retour vers un format tuilé.
+    ///
+    /// Le widget la garde aussi, mais `UpdateModel` le réécrit à chaque changement de modèle : sans
+    /// cette copie, passer de « A0 roll » à « A4 » puis revenir ramènerait 841 derrière le dos de
+    /// l'utilisatrice. 841 est le défaut de la table, et c'est la première valeur qu'elle voit.
+    qreal m_rollWidthMm{841.0};
+    /// La largeur du rouleau a-t-elle déjà été prise dans la table ? Une seule fois : après, c'est
+    /// la saisie qui commande, et la table n'a plus rien à dire.
+    bool m_rollWidthSeeded{false};
 
     QLabel *m_marginLabel{nullptr};
     QLineEdit *m_marginEdit{nullptr};

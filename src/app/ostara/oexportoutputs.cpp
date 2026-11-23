@@ -32,6 +32,7 @@
 #include "core/oexportcuttingguard.h"
 #include "core/oexportfavorites.h"
 #include "core/oexportoutput.h"
+#include "core/oexportrollpages.h"
 #include "core/olengthunits.h"
 #include "core/oexporttemplatestorage.h"
 #include "dialogs/oexportprintmodel.h"
@@ -265,9 +266,42 @@ auto ExportResultText(const OExportOutput &output, const OExportDrawing &drawing
         const double width = FromPixel(drawing.drawnRect.width(), unit);
         const double height = FromPixel(drawing.drawnRect.height(), unit);
 
+        // **La surface du PDF, et non celle des pièces.** C'est le chiffre que l'imprimante facture :
+        // la page entière, marges comprises, et — quand la case est cochée — le rectangle bleu seul.
+        // Elle se lit sur les MÊMES rectangles que le PDF écrit, calculés par la même fonction : une
+        // surface qui aurait sa propre formule finirait par annoncer un autre fichier.
+        const auto areaOf = [](const QVector<QRectF> &pages)
+        {
+            qreal px2 = 0.0;
+            for (const QRectF &page : pages)
+            {
+                px2 += page.width() * page.height();
+            }
+            return FromPixel2(px2, Unit::Mm) / 1000000.0;
+        };
+
+        const bool isRoll = output.format == OExportFormat::Kind::Print && !drawing.artboards.valid;
+        OExportRollPages::Result rollPages;
+        if (isRoll)
+        {
+            rollPages = OExportRollPages::Compute(output.result.placements,
+                                                  OExportRollPages::SettingsOf(output));
+        }
+
+        // **Deux lignes pour un rouleau, et la première est le CANVAS.** Sa largeur est celle du
+        // plan — 84.1 —, pas celle du PDF : c'est la seconde ligne qui parle des vraies pages, avec
+        // leur largeur de 83.1. Le mot « Plan » est là pour qu'on ne confonde plus les deux.
         QString label = MainWindow::tr("%1 × %2 %3").arg(QString::number(width, 'f', 1),
                                                          QString::number(height, 'f', 1),
                                                          UnitsToStr(unit, true));
+        if (isRoll)
+        {
+            label = MainWindow::tr("Plan : %1").arg(label);
+        }
+
+        int pageCount = 1;
+        qreal areaM2 = 0.0;
+        bool extraSheet = false;
 
         if (drawing.artboards.valid)
         {
@@ -275,14 +309,101 @@ auto ExportResultText(const OExportOutput &output, const OExportDrawing &drawing
             // others — it is the first page of the file — but it is not a cell of the grid, so the
             // plan's own count does not hold it. Only the ExtraSheet seat adds one; the two other
             // seats put the page on paper the plan already pays for.
-            const bool extraSheet = drawing.cover.seat == OExportCoverPage::Seat::ExtraSheet;
+            extraSheet = drawing.cover.seat == OExportCoverPage::Seat::ExtraSheet;
+            pageCount = drawing.sheets.count + (extraSheet ? 1 : 0);
+            areaM2 = FromPixel2(drawing.artboards.cellWidthPx * drawing.artboards.cellHeightPx, Unit::Mm)
+                     * pageCount / 1000000.0;
+
             label += extraSheet
                          ? MainWindow::tr(" · %n pages (cover page included)", nullptr,
                                           drawing.sheets.count + 1)
                          : MainWindow::tr(" · %n pages", nullptr, drawing.sheets.count);
         }
+        else if (isRoll)
+        {
+            pageCount = std::max(1, static_cast<int>(rollPages.pages.size()));
+            areaM2 = areaOf(rollPages.pages);
+            // Le compte, les largeurs et la surface d'un rouleau vont sur la SECONDE ligne : la
+            // première reste le canvas, et un rouleau se lit sur deux lignes.
+        }
+        else
+        {
+            // **Un projecteur n'a pas de grille**, donc pas de compte de feuilles : son nombre de
+            // pages vient de la DÉCOUPE que le format a faite, quand son plan ne tenait pas sous
+            // 500 × 500 cm. C'est le seul format qui découpe sans feuille, et il le dit ici.
+            const QVector<QRectF> pages = output.projectorPagesPx.isEmpty()
+                                              ? QVector<QRectF>{QRectF(0.0, 0.0, output.result.binWidthPx,
+                                                                       output.result.usedHeightPx)}
+                                              : output.projectorPagesPx;
+            pageCount = static_cast<int>(pages.size());
+            areaM2 = areaOf(pages);
 
-        return label + MainWindow::tr(" · %1").arg(GenerationTimeText(output.generationMs));
+            if (!output.projectorPagesPx.isEmpty())
+            {
+                label += MainWindow::tr(" · %n pages", nullptr, pageCount);
+            }
+        }
+
+        // **La surface ferme la ligne 1 pour tous les autres formats.** Un rouleau la porte à la fin
+        // de SA ligne 2, pour qu'on la rattache aux vraies pages et pas au canvas.
+        if (!isRoll)
+        {
+            label += MainWindow::tr(" · Surface PDF %1 m²").arg(QString::number(areaM2, 'f', 2));
+        }
+
+        QString text = label + MainWindow::tr(" · %1").arg(GenerationTimeText(output.generationMs));
+
+        // **Ce que le fichier a de particulier, dit après coup.** Un plan projeté trop grand sort en
+        // plusieurs pages — la raison est une limite du PDF et non du patron, et l'utilisatrice ne
+        // peut pas la deviner. Un plan qui n'a pas pris la forme demandée le dit aussi : on ne
+        // refuse pas, mais on ne laisse pas croire que le réglage a été suivi.
+        if (!output.projectorWarning.isEmpty())
+        {
+            text += QStringLiteral(" — ") + output.projectorWarning;
+        }
+
+        // Une pièce plus longue que la longueur demandée ne peut pas être coupée : sa page la
+        // dépasse. C'est exactement ce que la longueur existe pour éviter (le pliage manuel), donc
+        // on le dit — sans refuser, le fichier reste imprimable.
+        if (isRoll && rollPages.pageBeyondMax)
+        {
+            const qreal maxMm = output.maxPageLengthMm > 0.0 ? output.maxPageLengthMm
+                                                              : OExportRollPages::PdfPageMaxMm;
+            text += QStringLiteral(" — ")
+                    + MainWindow::tr("A piece is longer than the maximum page length (%1): its page "
+                                     "is longer.")
+                          .arg(OLengthUnits::Format(maxMm, unit));
+        }
+
+        // ── La seconde ligne du rouleau : les vraies pages, leur largeur, et la surface À LA FIN ─
+        //
+        // **Un rouleau, et lui seul** : les autres formats ont un nombre de feuilles, pas une
+        // longueur par page. La largeur est celle du PDF — 83.1 quand les marges G/D sont retirées,
+        // 84.1 sinon —, et chaque longueur est celle de la page, marges haut/bas comprises. La
+        // surface ferme la ligne : elle est donc lue comme la somme de ces pages-là, pas du canvas.
+        if (isRoll)
+        {
+            QStringList lengths;
+            lengths.reserve(rollPages.pages.size());
+            for (const QRectF &page : rollPages.pages)
+            {
+                // **Dans l'unité du run**, comme la ligne du dessus : une longueur de page en
+                // millimètres sous une unité « cm » annonçait 940.5 cm pour 94.05 cm.
+                lengths << QString::number(FromPixel(page.height(), unit), 'f', 1);
+            }
+
+            const qreal pdfWidth = rollPages.pages.isEmpty()
+                                       ? 0.0
+                                       : FromPixel(rollPages.pages.first().width(), unit);
+
+            text += QStringLiteral("\n")
+                    + MainWindow::tr("%n page(s) (largeur %1 %2) : %3 cm · %4 m²", nullptr, pageCount)
+                          .arg(QString::number(pdfWidth, 'f', 1), UnitsToStr(unit, true),
+                               lengths.join(QStringLiteral(" + ")),
+                               QString::number(areaM2, 'f', 2));
+        }
+
+        return text;
     }
 
     // « Fabric width » et « length » plutôt que « laize » et « métrage » : la chaîne source d'Ostara
@@ -439,6 +560,20 @@ auto MainWindow::RunExportNesting(const OExportRunRequest &request, const OGrade
     params.artboardCount    = request.columns;
     params.artboardHeightPx = ToPixel(request.frameHeightMm, Unit::Mm);
 
+    // **Le format A0 : des feuilles fermées, et une feuille qui se pose dans les deux sens.**
+    // Les deux sont DÉCLARÉS par le modèle et non déduits l'un de l'autre : l'un est une contrainte
+    // dure donnée au moteur, l'autre dit seulement que la feuille a deux sens — lequel sera pris,
+    // c'est l'utilisatrice qui le choisit (juste en dessous).
+    const OExportPrintModel *closedModel = FindPrintModel(request.printModelToken);
+    params.closedSheets = closedModel != nullptr && closedModel->closedSheets;
+    params.sheetBothWays = closedModel != nullptr && closedModel->hasOrientation;
+
+    // **Et le SENS est celui de l'utilisatrice**, pas celui que le nombre de pages désignerait. Le
+    // nesting nidifie dans ce sens-là : des feuilles empilées, comme en portrait, ne peuvent pas
+    // sortir d'un plan tourné après coup (il donnerait des feuilles côte à côte). Voir
+    // OExportNestingParams::landscapeSheet.
+    params.landscapeSheet = params.sheetBothWays && request.documentLandscape;
+
     // Et le tissu plié, qui ne se dit pas seulement ici : c'est le nesting qui en tire la rotation
     // d'une pièce au pli et son ancrage au bord. Voir OExportNestingParams::foldedFabric.
     params.foldedFabric = request.foldedFabric;
@@ -473,6 +608,8 @@ auto MainWindow::RunExportNesting(const OExportRunRequest &request, const OGrade
     // Le moteur ne demande qu'une chose : les pièces suivent-elles leur droit-fil ? Un plan de
     // coupe et un projecteur, oui ; une impression, non.
     params.grainlinePinned = OExportFormat::IsCutting(request.format);
+    // Seul le mot du refus en dépend : le tissu d'un plan de coupe, le papier d'une impression.
+    params.printRun = request.format == OExportFormat::Kind::Print;
 
     // ── Le sens unique est une RÈGLE du projecteur, pas un réglage ───────────────────────────────
     //
@@ -820,6 +957,14 @@ auto MainWindow::RunExportNesting(const OExportRunRequest &request, const OGrade
         /// zéro veut dire « rien de particulier », donc les valeurs de la requête.
         int widthMm{0};
         qreal gapMm{0.0};
+
+        /// Les pages du PDF projeté, quand le plan n'en tient pas sur une seule — vide sinon.
+        /// @see OExportProjector::Outcome::pagesPx
+        QVector<QRectF> pagesPx{};
+
+        /// Ce que le run a à dire sans avoir échoué (plan pas assez carré, écrit en plusieurs
+        /// pages…) — vide quand il n'y a rien à dire.
+        QString warning{};
     };
 
     /// Le sort d'une passe : son plan, ou la raison pour laquelle il n'y en a pas. **Aucun message
@@ -1182,6 +1327,10 @@ auto MainWindow::RunExportNesting(const OExportRunRequest &request, const OGrade
             OExportProjector::Limits limits;
             limits.gapMm = request.gapMm;
             limits.pageMaxMm = 5000.0;
+            // **Le seul réglage de la recherche** : carré, portrait ou paysage. Il ne change pas le
+            // plafond — 500 × 500 cm reste la page d'un projecteur — il change l'ordre dans lequel
+            // les paliers sont essayés, et le critère qui désigne le gagnant.
+            limits.shape = request.pageShape;
 
             QFuture<OExportProjector::Outcome> future = QtConcurrent::run(
                 &pool, &OExportProjector::Nest, planLayers, planParams, limits);
@@ -1213,6 +1362,8 @@ auto MainWindow::RunExportNesting(const OExportRunRequest &request, const OGrade
 
             pass.plan = PlanPass{std::move(planLayers), outcome.result, std::move(planGroupDecor),
                                  outcome.widthMm, outcome.gapMm};
+            pass.plan->pagesPx = outcome.pagesPx;
+            pass.plan->warning = outcome.warning;
             return pass;
         }
 
@@ -1308,7 +1459,8 @@ auto MainWindow::RunExportNesting(const OExportRunRequest &request, const OGrade
 
             if (VApplication::IsGUIMode())
             {
-                QMessageBox::warning(this, tr("Export mode"), stopped.error, QMessageBox::Ok, QMessageBox::Ok);
+                QMessageBox::warning(this, tr("Export mode"), tr("The export stopped:\n\n%1").arg(stopped.error),
+                                     QMessageBox::Ok, QMessageBox::Ok);
             }
             return;
         }
@@ -1335,7 +1487,11 @@ auto MainWindow::RunExportNesting(const OExportRunRequest &request, const OGrade
 
         if (VApplication::IsGUIMode())
         {
-            QMessageBox::warning(this, tr("Export mode"), message + QStringLiteral("\n\n") + stopped.diagnostic,
+            // The diagnostic is the exporter's own wording: it is labelled as technical instead of being dropped
+            // into the sentence as if it were meant for the reader.
+            QMessageBox::warning(this, tr("Export mode"),
+                                 message + QStringLiteral("\n\n")
+                                     + tr("Technical detail: %1").arg(stopped.diagnostic),
                                  QMessageBox::Ok, QMessageBox::Ok);
         }
     };
@@ -1390,6 +1546,10 @@ auto MainWindow::RunExportNesting(const OExportRunRequest &request, const OGrade
     }
     output.unit = request.unit;
     output.printModelToken = request.printModelToken;
+    output.maxPageLengthMm = request.maxPageLengthMm;
+    output.trimSideMargins = request.trimSideMargins;
+    output.documentLandscape = request.documentLandscape;
+    output.pageShape = request.pageShape;
     output.columns = request.columns;
     output.frameHeightMm = request.frameHeightMm;
     output.marksTemplateName = request.marksTemplateName;
@@ -1412,6 +1572,61 @@ auto MainWindow::RunExportNesting(const OExportRunRequest &request, const OGrade
     // commencer par l'écriture DXF / PLT / HPGL, le PDF et l'image.
     output.layers = std::move(fabric.plan->layers);
     output.result = std::move(fabric.plan->result);
+    // Les pages d'un projecteur : vides quand le plan tient sur une seule, et c'est le cas normal.
+    // Elles voyagent à côté du résultat et non dedans, parce que tout ce qui lit un plan n'a pas à
+    // apprendre qu'un projecteur ait pu le découper.
+    output.projectorPagesPx = std::move(fabric.plan->pagesPx);
+    output.projectorWarning = fabric.plan->warning;
+
+    // **La feuille que le plan a RÉELLEMENT prise.** Un format qui se pose dans les deux sens ne
+    // décide pas de son orientation avant de nidifier : c'est le nombre de pages qui tranche, et le
+    // nesting rend la hauteur de la feuille gagnante. Zéro sur tout run qui n'a pas eu le choix —
+    // les lecteurs (grille, canevas, PDF) prennent alors celle de la requête.
+    if (output.result.sheetHeightPx > 0.0)
+    {
+        output.frameHeightMm = FromPixel(output.result.sheetHeightPx, Unit::Mm);
+        // Et la LARGEUR avec : le plan a été posé sur une feuille de 1 189 de large si c'est le
+        // paysage qui a gagné, et la grille, le canevas et le PDF lisent ce chiffre-là.
+        output.documentWidthMm = FromPixel(output.result.binWidthPx, Unit::Mm);
+    }
+
+    // ── Les pages d'un rouleau, réagencées pour être INDÉPENDANTES ──────────────────────────────
+    //
+    // `Layout` ne se contente pas de découper : il pousse vers le bas ce qu'il faut pour que chaque
+    // page ait SA marge en haut et en bas. Sans lui, deux pages voisines partageraient le même blanc
+    // — le bas de l'une serait le haut de l'autre — et une pièce posée dans cette marge
+    // apparaîtrait sur les deux pages du PDF. **C'est ici, une fois, que le plan est réagencé** : le
+    // canvas, la barre d'état et le PDF relisent ensuite les placements de la sortie.
+    //
+    // ⚠️ **L'ordre des placements ne change pas** — seuls leurs `y` bougent. `result.keys` leur est
+    // indexé, et les trier ici désalignerait les clés en silence.
+    //
+    // Le plafond du PDF reste un refus : une page de plus de 500 cm n'est pas un PDF utilisable
+    // (Trame n'écrit aucun `/UserUnit`). Une PIÈCE plus longue ne se découpe pas, donc on refuse
+    // plutôt que de livrer un plan qui a l'air juste.
+    if (output.format == OExportFormat::Kind::Print && output.frameHeightMm <= 0.0)
+    {
+        OExportRollPages::LayoutResult layout =
+            OExportRollPages::Layout(output.result.placements, OExportRollPages::SettingsOf(output));
+        if (layout.pages.pastPdfLimit)
+        {
+            const QString message =
+                tr("The plan is larger than 500 cm, the biggest page a PDF can hold and still be read "
+                   "by other software. It cannot be cut into pages without cutting a piece.");
+            if (error != nullptr)
+            {
+                *error = message;
+            }
+            if (VApplication::IsGUIMode())
+            {
+                QMessageBox::warning(this, tr("Export mode"), message, QMessageBox::Ok, QMessageBox::Ok);
+            }
+            return std::nullopt;
+        }
+
+        output.result.placements = std::move(layout.placements);
+        output.result.usedHeightPx = layout.usedHeightPx;
+    }
 
     // Le décor des groupes de la couche de référence, résolu pendant la marche des tailles. Il rejoint
     // le résultat ici, et pas ailleurs : c'est la seule chose que le canvas reçoit qui appartienne à
@@ -1851,13 +2066,23 @@ void MainWindow::ExportOutputToPdf(quint32 id)
         }
     }
 
+    QString pdfFailure;
     if (!OExportPdf::Write(*existing, dialog.FullPath(), pattern, doc,
                            hasMarks ? &marks : nullptr, framed, dialog.AddLayoutLayer(),
                            cover.IsEmpty() ? nullptr : &cover, dialog.CarriesPayload(),
-                           gradedDrawing))
+                           gradedDrawing, &pdfFailure))
     {
-        QMessageBox::warning(this, tr("Export mode"),
-                             tr("\"%1\" could not be exported.").arg(existing->name));
+        // ⚠️ **La raison, quand l'écrivain en a une.** Le conseil sur le dossier ne vaut que pour un
+        // échec causé par le fichier : l'afficher sur une erreur de dessin envoyait chercher un
+        // dossier parfaitement inscriptible, et c'est exactement ce qui s'est produit.
+        QMessageBox::warning(
+            this, tr("Export mode"),
+            tr("\"%1\" could not be written to:\n%2\n\n%3")
+                .arg(existing->name, QDir::toNativeSeparators(dialog.FullPath()),
+                     pdfFailure.isEmpty()
+                         ? tr("Check that the folder allows writing, and that the file is not open "
+                              "in another program.")
+                         : pdfFailure));
         return;
     }
 
@@ -1898,7 +2123,9 @@ void MainWindow::ExportOutputToPlotterSvg(quint32 id)
     if (!OExportPlotterSvg::Write(dialog.FullPath(), *existing, pattern, doc))
     {
         QMessageBox::warning(this, tr("Export mode"),
-                             tr("\"%1\" could not be exported.").arg(existing->name));
+                             tr("\"%1\" could not be written to:\n%2\n\nCheck that the folder allows writing, "
+                                "and that the file is not open in another program.")
+                                 .arg(existing->name, QDir::toNativeSeparators(dialog.FullPath())));
         return;
     }
 
@@ -1965,8 +2192,9 @@ void MainWindow::ExportOutputToCuttingFile(quint32 id)
         // échoué laisserait croire que rien n'est sorti — ou que tout l'est, si le premier fichier est
         // passé. Les deux cas se ressemblent à l'écran, et un seul est vrai.
         QMessageBox::warning(this, tr("Export mode"),
-                             tr("\"%1\" could not be exported.").arg(existing->name)
-                                 + QStringLiteral("\n\n") + failed.join(QLatin1Char('\n')));
+                             tr("\"%1\" could not be written. These files are missing:\n\n%2\n\nCheck that the "
+                                "folder allows writing, and that none of them is open in another program.")
+                                 .arg(existing->name, failed.join(QLatin1Char('\n'))));
         return;
     }
 
@@ -2127,6 +2355,8 @@ void MainWindow::ExportActiveOutputToImage()
     }
     lines << tr("%n file(s) could not be written:", "", static_cast<int>(failed.size()));
     lines << failed;
+    lines << QString();
+    lines << tr("Check that the folder allows writing, and that none of the files is open in another program.");
 
     QMessageBox::warning(this, tr("Export mode"), lines.join(QLatin1Char('\n')));
 }
@@ -2139,12 +2369,27 @@ auto MainWindow::ExportMarksOf(const OExportOutput &output, OExportTemplate &mar
     // is a file the user edits, and a run that had copied its frame and its marks would go on
     // drawing what the file said the day it was nested, while the editor shows something else:
     // the drawing would then be lying about the very thing it is there to show.
+    // **Le format peut interdire le décor, et ce n'est pas une affaire de nom vide.**
+    //
+    // `OExportTemplateStorage::Resolve("")` retombe sur « Default » : une génération qui ne porte
+    // pas de décor ne peut donc pas le dire en vidant le champ. Elle le dit ici, par son format —
+    // l'A0 imprime des feuilles entières qu'une machine plie en A4 : il n'y a rien à assembler,
+    // donc ni cadre, ni ciseaux, ni repères, ni numérotation.
+    //
+    // Ce point de coupe est unique, et c'est ce qui rend la règle tenable : les deux appelants du
+    // PDF, le document de dessous comme le canevas passent tous par ici.
+    const OExportPrintModel *model = FindPrintModel(output.printModelToken);
+    if (model != nullptr && !model->hasDecor)
+    {
+        framed = false;
+        return false;
+    }
+
     const bool hasMarks = OExportTemplateStorage::Resolve(output.marksTemplateName, &marks);
 
     // Whether the format carries a frame — the two framed formats, and them alone. Read off the
     // table rather than guessed from the geometry: the frame is a property of the model, and its
     // sheet happens to be the size the frame is.
-    const OExportPrintModel *model = FindPrintModel(output.printModelToken);
     framed = model != nullptr && model->hasFrame;
 
     return hasMarks;
@@ -2202,8 +2447,17 @@ void MainWindow::DrawExportDrawing(QGraphicsScene *scene, const OExportOutput &o
     bool framed = false;
     const bool hasMarks = ExportMarksOf(output, marks, framed);
 
+    // **A0 et A0 Roll dessinent leurs pages séparées** — comme un plan de coupe sépare ses bandes.
+    // Le vide entre deux pages est d'affichage ; la longueur du plan et le PDF ne le voient pas.
+    const OExportPrintModel *printModel = FindPrintModel(output.printModelToken);
+    const bool separatePages = printModel != nullptr
+                               && (printModel->shape == OExportPrintShape::Roll
+                                   || QLatin1String(printModel->token) == QLatin1String("A0"));
+
     const OExportRunFlags flags{output.format, output.foldedFabric, output.matWidthMm,
-                                output.matHeightMm, output.result.matCount};
+                                output.matHeightMm, output.result.matCount, output.marginMm,
+                                output.maxPageLengthMm, output.trimSideMargins,
+                                !output.coverPageTemplateName.isEmpty(), separatePages};
 
     // Le plan de TISSU ouvre la scène — c'est lui qui la vide, et il part de son origine.
     OExportCanvas::Build(scene, output.layers, output.result,

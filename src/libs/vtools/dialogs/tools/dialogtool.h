@@ -183,6 +183,15 @@ protected:
     /** @brief data container with data */
     VContainer data;
 
+    /** @brief Refuse a step: what the reader picked cannot be accepted.
+     *
+     * The message goes to the status line, where it stays while the step is answered, and to the log with the
+     * "Pattern messages" signature so it also lands in the warning pane. Never a modal box: these refusals happen
+     * while points are being picked on the canvas, and a box there interrupts the gesture to repeat what the status
+     * line already says (see rules.md §4.4). */
+    void RefuseStep(const QString &message);
+
+
     VAbstractPattern *m_doc;
 
     /** @brief isInitialized true if window is initialized */

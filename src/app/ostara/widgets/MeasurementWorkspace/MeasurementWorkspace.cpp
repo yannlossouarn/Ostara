@@ -32,6 +32,7 @@
 #include "xml/oomtdocument.h"
 #include "xml/ootudocument.h"
 #include "vtheme.h"
+#include "core/osavednotification.h"
 #include "core/otranslation.h"
 
 #include <QDir>
@@ -422,15 +423,17 @@ void MeasurementWorkspace::DoSave(const QString &filePath)
 
     if (!ok)
     {
-        QMessageBox::critical(this,
-            tr("Save error"),
-            tr("Unable to save file.\n\n%1").arg(error));
+        QMessageBox::critical(this, tr("Save error"),
+                              tr("Ostara could not save this table:\n%1\n\n%2\n\nCheck that the folder allows "
+                                 "writing, and that the file is not open in another program.")
+                                  .arg(QDir::toNativeSeparators(filePath), error));
         return;
     }
 
     m_currentFilePath = filePath;
     m_modified = false;
     UpdateTitle();
+    OSavedNotification::Measurements(this);
 }
 
 bool MeasurementWorkspace::ConfirmOverwrite(const QString &filePath) const

@@ -900,8 +900,11 @@ auto CollectLayeredPairs(const QDomElement &draw) -> QMap<quint32, QSet<quint32>
 //---------------------------------------------------------------------------------------------------------------------
 // Every object of one piece that a layer can actually hold, as an (objectId, toolId) pair. The reading itself lives
 // on the model — VAbstractPattern::LayerableObjectsOfTool — because the tool creation path needs the very same rule.
+// The document goes with it: a copy's pieces are layerable, but only those the canvas actually draws, and that
+// question is answered by the cut each piece comes from.
 //---------------------------------------------------------------------------------------------------------------------
-auto ContainerObjects(const QDomElement &container) -> QVector<QPair<quint32, quint32>>
+auto ContainerObjects(const QDomElement &container, VAbstractPattern *doc, bool drawnOnly = true)
+    -> QVector<QPair<quint32, quint32>>
 {
     QVector<QPair<quint32, quint32>> objects;
 
@@ -914,7 +917,7 @@ auto ContainerObjects(const QDomElement &container) -> QVector<QPair<quint32, qu
         {
             continue;
         }
-        objects += VAbstractPattern::LayerableObjectsOfTool(element, toolId);
+        objects += VAbstractPattern::LayerableObjectsOfTool(element, toolId, doc, drawnOnly);
     }
 
     return objects;
@@ -951,14 +954,30 @@ auto CleanStaleLayerItems(VAbstractPattern *doc) -> bool
         // point ignores the object id it is handed (VToolSinglePoint::GroupVisibility), and ParseGroups applies the
         // pairs in ascending key order, so a stale key with a HIGHER id decides that point's visibility in place
         // of its own. Measured on a real file: three stale keys (735, 736 and 737, all on tool 733) sitting in a
-        // VISIBLE layer held a point of a HIDDEN layer on screen. A pair no tool can produce cannot be meant.
+        // VISIBLE layer held a point of a HIDDEN layer on screen. A pair the element does not DECLARE at all cannot
+        // be meant — that, and only that, is what this pass removes.
         QMap<quint32, QSet<quint32>> drawable;
         for (const QDomElement &container : {draw.firstChildElement(VAbstractPattern::TagCalculation),
                                              draw.firstChildElement(VAbstractPattern::TagModeling)})
         {
-            for (const auto &[objectId, toolId] : ContainerObjects(container))
+            for (const auto &[objectId, toolId] : ContainerObjects(container, doc))
             {
                 drawable[toolId].insert(objectId);
+            }
+        }
+
+        // A pair the element does not DRAW may still be one it DECLARES — a copy a layer names from before the
+        // pieces existed, a cut's half its cut no longer shows. Those designate something real, and a file written
+        // before this rule was in place is full of them: judging them by the canvas alone took the copy out of its
+        // layer at every opening, and a curve no layer names is drawn whatever the layers say. Measured on a
+        // client's file: eighty pairs lost, twenty-four of them the copies of rotations and moves.
+        QMap<quint32, QSet<quint32>> declared;
+        for (const QDomElement &container : {draw.firstChildElement(VAbstractPattern::TagCalculation),
+                                             draw.firstChildElement(VAbstractPattern::TagModeling)})
+        {
+            for (const auto &[objectId, toolId] : ContainerObjects(container, doc, false))
+            {
+                declared[toolId].insert(objectId);
             }
         }
         // Pieces are tools too, and a group holding one is not something this pass has to understand: it is
@@ -985,7 +1004,8 @@ auto CleanStaleLayerItems(VAbstractPattern *doc) -> bool
                 const quint32 objectId = item.hasAttribute(VAbstractPattern::AttrObject)
                                              ? item.attribute(VAbstractPattern::AttrObject).toUInt()
                                              : toolId; // `object` is omitted when it equals `tool`
-                if (not drawable.value(toolId).contains(objectId))
+                if (not drawable.value(toolId).contains(objectId)
+                    && not declared.value(toolId).contains(objectId))
                 {
                     stale.append(item);
                 }
@@ -1093,6 +1113,7 @@ auto AppendPairIfMissing(VAbstractPattern *doc, QDomElement &group, quint32 tool
     group.appendChild(item);
     return true;
 }
+
 } // namespace
 
 //---------------------------------------------------------------------------------------------------------------------
@@ -1104,6 +1125,14 @@ auto CoupleCutSegmentsToBaseLayers(VAbstractPattern *doc) -> bool
     // the curve they draw. This pass gives an unlayered half the layers of the base curve it replaces: the layers
     // of the drawing it takes the place of. It only seeds what no layer names, so a half the user has filed
     // somewhere is left exactly where it is.
+    //
+    // The two pieces of an armhole curve split at the carrure are in the same state, and for the same reason: a
+    // file written before the layers knew them names neither, and they draw the curve they belong to.
+    //
+    // The copy an operation makes of a cut curve follows the same rule: the pieces it is drawn with take the layers
+    // of the copy they replace. A copy no piece replaces keeps the pair the file writes for it, and nothing here
+    // invents a layer for it — a guess of that kind put curves made by rotations into a client's construction
+    // layers, and the layers of a file are the user's.
     if (doc == nullptr)
     {
         return false;
@@ -1132,7 +1161,7 @@ auto CoupleCutSegmentsToBaseLayers(VAbstractPattern *doc) -> bool
         QMap<quint32, quint32> objectTool;
         for (const QDomElement &container : {calculation, modeling})
         {
-            for (const auto &[objectId, toolId] : ContainerObjects(container))
+            for (const auto &[objectId, toolId] : ContainerObjects(container, doc))
             {
                 objectTool.insert(objectId, toolId);
             }
@@ -1145,7 +1174,10 @@ auto CoupleCutSegmentsToBaseLayers(VAbstractPattern *doc) -> bool
         {
             // The other point tools write segment1Id/segment2Id too, without drawing anything: their ids are
             // graph objects, and seeding them here would file objects nobody can see (point A13, Buste.ostara).
-            if (not VAbstractPattern::IsCutPoint(point))
+            // A cut that does not show its two segments draws neither half for the same reason: the whole base
+            // curve stays on the canvas, and the model does not offer the halves to a layer (LayerableObjectsOfTool).
+            if (not VAbstractPattern::IsCutPoint(point)
+                || point.attribute(AttrShowTwoSegments) != trueStr)
             {
                 continue;
             }
@@ -1198,6 +1230,130 @@ auto CoupleCutSegmentsToBaseLayers(VAbstractPattern *doc) -> bool
                 }
             }
         }
+
+        // The armhole curve splits itself at the carrure and DRAWS the two pieces in place of the whole curve; a
+        // spline path segmented at its nodes draws its own pieces the same way. Both keep them as attributes of
+        // the very `<spline>` that draws them (`segment1Id`/`segment2Id` for the first, `portionIds` for the
+        // second), and a file written before the layers knew them names neither — the rule being that nothing
+        // sits outside a layer, not even a piece a setting brought into being. Same treatment as a cut's halves,
+        // and for the same reason: an unlayered piece takes the layers of the curve it replaces, so it stays with
+        // the drawing it belongs to instead of falling into the automatic layer; a piece the user has filed
+        // somewhere is left exactly where it is.
+        for (QDomElement spline = calculation.firstChildElement(VAbstractPattern::TagSpline); !spline.isNull();
+             spline = spline.nextSiblingElement(VAbstractPattern::TagSpline))
+        {
+            const quint32 splineId = spline.attribute(VDomDocument::AttrId).toUInt();
+            if (splineId == NULL_ID)
+            {
+                continue;
+            }
+
+            QVector<quint32> pieces;
+            for (const QString &attribute : {AttrSegment1Id, AttrSegment2Id})
+            {
+                if (const quint32 pieceId = spline.attribute(attribute).toUInt(); pieceId != NULL_ID)
+                {
+                    pieces.append(pieceId);
+                }
+            }
+
+            if (spline.hasAttribute(AttrPortionIds))
+            {
+                // The shape `OSplinePathPortions::EncodePieces` writes: `key=id` or `key=name=id`, joined by `;`.
+                // libs/ifc reads the same string for the layers (LayerableObjectsOfTool); here the id is what the
+                // pass needs, and it is the last '=' field of a part.
+                const QStringList parts
+                    = spline.attribute(AttrPortionIds).split(QLatin1Char(';'), Qt::SkipEmptyParts);
+                for (const QString &part : parts)
+                {
+                    const QStringList fields = part.split(QLatin1Char('='));
+                    if (fields.size() < 2)
+                    {
+                        continue;
+                    }
+                    if (const quint32 pieceId = fields.constLast().trimmed().toUInt(); pieceId != NULL_ID)
+                    {
+                        pieces.append(pieceId);
+                    }
+                }
+            }
+
+            for (const quint32 pieceId : std::as_const(pieces))
+            {
+                if (layered.value(splineId).contains(pieceId))
+                {
+                    continue;
+                }
+
+                for (QDomElement group = groups.firstChildElement(VAbstractPattern::TagGroup); !group.isNull();
+                     group = group.nextSiblingElement(VAbstractPattern::TagGroup))
+                {
+                    if (GroupHoldsPair(group, splineId, splineId))
+                    {
+                        changed = AppendPairIfMissing(doc, group, splineId, pieceId) || changed;
+                    }
+                }
+            }
+        }
+
+        // An operation's copy of a cut curve is drawn by the pieces it was split into, and a layer holds what is
+        // drawn — the copy itself is then invisible and has no business in one. The pieces take the layers of the
+        // copy they replace, and only the pieces actually drawn are named (DrawnPieceIds). The copy's own entry is
+        // left to CleanStaleLayerItems, which runs AFTER this pass for exactly that reason.
+        //
+        // A copy NO piece replaces is the other half of the rule, and it needs nothing here: with every cut box
+        // off nothing takes the copy's place, the copy is drawn whole, and the pair a layer already writes for it
+        // is kept by CleanStaleLayerItems. Seeding it from the layers of its figure was tried and removed: on a
+        // client's file it filed curves made by rotations into construction layers that never held them, and the
+        // layers of a file are the user's, not a guess.
+        for (QDomElement operation = calculation.firstChildElement(VAbstractPattern::TagOperation);
+             !operation.isNull(); operation = operation.nextSiblingElement(VAbstractPattern::TagOperation))
+        {
+            const quint32 operationId = operation.attribute(VDomDocument::AttrId).toUInt();
+            if (operationId == NULL_ID || groups.isNull())
+            {
+                continue;
+            }
+
+            const QDomElement destination = operation.firstChildElement(QStringLiteral("destination"));
+            for (QDomElement item = destination.firstChildElement(QStringLiteral("item")); !item.isNull();
+                 item = item.nextSiblingElement(QStringLiteral("item")))
+            {
+                const quint32 copyId = item.attribute(AttrIdObject).toUInt();
+                if (copyId == NULL_ID)
+                {
+                    continue;
+                }
+
+                const QVector<quint32> pieces = VAbstractPattern::DrawnPieceIds(item, doc);
+                if (pieces.isEmpty())
+                {
+                    // The copy is drawn whole, and a layer written for it names it: it keeps its pair (see
+                    // CleanStaleLayerItems, which no longer takes it away), and this pass has nothing to invent
+                    // for it. Guessing a home here is what filled a client's construction layer with curves made
+                    // by rotations: the layers of a file are the user's, and nothing but the "Unnamed" layer is
+                    // ever given to an object they did not file.
+                    continue;
+                }
+
+                for (const quint32 pieceId : pieces)
+                {
+                    if (layered.value(operationId).contains(pieceId))
+                    {
+                        continue;
+                    }
+
+                    for (QDomElement group = groups.firstChildElement(VAbstractPattern::TagGroup);
+                         !group.isNull(); group = group.nextSiblingElement(VAbstractPattern::TagGroup))
+                    {
+                        if (GroupHoldsPair(group, operationId, copyId))
+                        {
+                            changed = AppendPairIfMissing(doc, group, operationId, pieceId) || changed;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     return changed;
@@ -1234,7 +1390,7 @@ auto NormalizeUnlayeredObjects(VAbstractPattern *doc) -> bool
         }
 
         // Every object of the piece a layer could hold, as (objectId, toolId).
-        const QVector<QPair<quint32, quint32>> objects = ContainerObjects(calculation);
+        const QVector<QPair<quint32, quint32>> objects = ContainerObjects(calculation, doc);
 
         if (objects.isEmpty())
         {
@@ -1354,12 +1510,38 @@ auto NormalizeActiveLayer(VAbstractPattern *doc) -> bool
 
         const QDomElement target = not saved.isNull() ? saved : (not unnamed.isNull() ? unnamed : first);
 
+        // **An active layer that is hidden is a trap**: everything the user creates lands in it and nothing of it
+        // is ever seen — the pattern looks like a canvas that refuses to draw. Hiding a layer is a deliberate
+        // gesture and it is kept, but the flag never stays on a closed eye: it goes to the first layer that is
+        // shown, and the hidden one keeps its eye closed. When the piece shows no layer at all, the one the file
+        // named is shown instead, because there has to be somewhere to draw.
+        QDomElement active = target;
+        if (target.attribute(VAbstractPattern::AttrVisible) == falseStr)
+        {
+            QDomElement shown;
+            for (QDomElement group = groups.firstChildElement(VAbstractPattern::TagGroup); !group.isNull();
+                 group = group.nextSiblingElement(VAbstractPattern::TagGroup))
+            {
+                if (group.attribute(VAbstractPattern::AttrVisible) != falseStr)
+                {
+                    shown = group;
+                    break;
+                }
+            }
+
+            if (not shown.isNull())
+            {
+                active = shown;
+                changed = true;
+            }
+        }
+
         // Exactly one active layer: the flag is a marker, so it is removed from all the others. This also repairs
         // a hand-edited file carrying it twice.
         for (QDomElement group = groups.firstChildElement(VAbstractPattern::TagGroup); !group.isNull();
              group = group.nextSiblingElement(VAbstractPattern::TagGroup))
         {
-            const bool isTarget = group == target;
+            const bool isTarget = group == active;
             if (isTarget && group.attribute(VAbstractPattern::AttrActive) != trueStr)
             {
                 group.setAttribute(VAbstractPattern::AttrActive, trueStr);
@@ -1372,15 +1554,30 @@ auto NormalizeActiveLayer(VAbstractPattern *doc) -> bool
             }
 
             // The active layer is always shown — otherwise the first object created would land in a hidden layer
-            // and never be seen. Same rule as SetActiveGroup. But ONLY when this pass is the one choosing the
-            // active layer: a file that names its own active layer has its visibility respected as written,
-            // because hiding the active layer is a deliberate gesture and it has to survive a save. Forcing it
-            // here made the eye flip back to visible on every open (measured: a file saved with its active layer
-            // hidden came back shown, while its other hidden layers stayed hidden).
-            if (isTarget && saved.isNull() && group.attribute(VAbstractPattern::AttrVisible) != trueStr)
+            // and never be seen. It only comes into play when the piece shows nothing at all: any shown layer is
+            // preferred above (see above), so a layer the user hid stays hidden and only loses the flag.
+            if (isTarget && group.attribute(VAbstractPattern::AttrVisible) != trueStr)
             {
                 group.setAttribute(VAbstractPattern::AttrVisible, trueStr);
                 changed = true;
+            }
+        }
+
+        // A layer folded inside its group is no layer at all: the dock shows a closed arrow and nothing else. The
+        // group of the layer the user is about to draw on is opened, so that the flag they work with can be seen.
+        const QString parent = active.attribute(VAbstractPattern::AttrLayerGroup);
+        if (not parent.isEmpty())
+        {
+            const QDomElement layerGroups = draw.firstChildElement(VAbstractPattern::TagLayerGroups);
+            for (QDomElement group = layerGroups.firstChildElement(VAbstractPattern::TagLayerGroup);
+                 not group.isNull(); group = group.nextSiblingElement(VAbstractPattern::TagLayerGroup))
+            {
+                if (group.attribute(VDomDocument::AttrId) == parent
+                    && group.attribute(VAbstractPattern::AttrCollapsed) == trueStr)
+                {
+                    group.removeAttribute(VAbstractPattern::AttrCollapsed);
+                    changed = true;
+                }
             }
         }
     }

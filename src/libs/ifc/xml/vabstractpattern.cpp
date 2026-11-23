@@ -109,6 +109,8 @@ const QString VAbstractPattern::TagCustomerEmail = QStringLiteral("email");
 const QString VAbstractPattern::TagCollection = QStringLiteral("collection");
 const QString VAbstractPattern::TagFabricInfo = QStringLiteral("fabricInfo");
 const QString VAbstractPattern::TagCartouche = QStringLiteral("cartouche");
+const QString VAbstractPattern::TagPatternVersions = QStringLiteral("patternVersions");
+const QString VAbstractPattern::TagPatternVersion = QStringLiteral("patternVersion");
 const QString VAbstractPattern::TagCompanyName = QStringLiteral("company");
 const QString VAbstractPattern::TagWatermark = QStringLiteral("watermark");
 const QString VAbstractPattern::TagFinalMeasurements = QStringLiteral("finalMeasurements");
@@ -475,6 +477,7 @@ auto VAbstractPattern::GetActivNodeElement(const QString &name, QDomElement &ele
 //---------------------------------------------------------------------------------------------------------------------
 void VAbstractPattern::ParseGroups(const QDomElement &domElement)
 {
+    InvalidateVisibilityIndex(); // the layers change: IsObjectVisible must not answer from the old index
     Q_ASSERT_X(not domElement.isNull(), Q_FUNC_INFO, "domElement is null");
 
     QMap<quint32, quint32> itemTool;
@@ -524,6 +527,22 @@ void VAbstractPattern::ParseGroups(const QDomElement &domElement)
 //---------------------------------------------------------------------------------------------------------------------
 auto VAbstractPattern::IsObjectVisible(quint32 objectId) const -> bool
 {
+    if (m_visibilityIndexScopes > 0)
+    {
+        if (not m_visibilityIndexBuilt)
+        {
+            BuildVisibilityIndex();
+        }
+
+        if (m_visibilityIndexUnreadable)
+        {
+            return true;
+        }
+
+        const auto held = m_visibilityIndex.constFind(objectId);
+        return held == m_visibilityIndex.constEnd() || held.value();
+    }
+
     // The layers of every block, and the object read from each pair the way ParseItemElement reads it: the tool
     // attribute, and an object attribute that defaults to the tool — a pair written as (tool, tool) is the object
     // of that tool, which is how a point of its own is listed.
@@ -566,6 +585,85 @@ auto VAbstractPattern::IsObjectVisible(quint32 objectId) const -> bool
 
     // An object no layer holds is shown: the layer pass never hides it either.
     return not held;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void VAbstractPattern::BuildVisibilityIndex() const
+{
+    // The walk of IsObjectVisible, once for every object instead of once per question, with the same answers:
+    //  - an item read the same way (the object attribute, defaulting to the tool);
+    //  - an object is shown as soon as one layer holding it is shown;
+    //  - a layer whose `visible` cannot be read answers "shown" for what it holds — the walk returns true when it
+    //    reaches it for an object it holds;
+    //  - an item that cannot be read answers "shown" for EVERY object — the walk reaches it for any object it has
+    //    not already found shown, and returns true.
+    m_visibilityIndex.clear();
+    m_visibilityIndexUnreadable = false;
+    m_visibilityIndexBuilt = true;
+
+    try
+    {
+        const QDomElement root = documentElement();
+        for (QDomElement draw = root.firstChildElement(TagDraw); not draw.isNull();
+             draw = draw.nextSiblingElement(TagDraw))
+        {
+            const QDomElement groups = draw.firstChildElement(TagGroups);
+            for (QDomElement group = groups.firstChildElement(TagGroup); not group.isNull();
+                 group = group.nextSiblingElement(TagGroup))
+            {
+                bool shown = true;
+                try
+                {
+                    shown = GetParametrBool(group, AttrVisible, trueStr);
+                }
+                catch (const VException &) // NOLINT(bugprone-empty-catch)
+                {
+                    shown = true; // see above
+                }
+
+                for (QDomElement item = group.firstChildElement(TagGroupItem); not item.isNull();
+                     item = item.nextSiblingElement(TagGroupItem))
+                {
+                    const quint32 tool = GetParametrUInt(item, AttrTool, NULL_ID_STR);
+                    const quint32 object = GetParametrUInt(item, AttrObject, QString::number(tool));
+                    bool &value = m_visibilityIndex[object]; // false when first held
+                    value = value || shown;
+                }
+            }
+        }
+    }
+    catch (const VException &) // NOLINT(bugprone-empty-catch)
+    {
+        m_visibilityIndex.clear();
+        m_visibilityIndexUnreadable = true;
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void VAbstractPattern::InvalidateVisibilityIndex() const
+{
+    m_visibilityIndex.clear();
+    m_visibilityIndexBuilt = false;
+    m_visibilityIndexUnreadable = false;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+VAbstractPattern::VisibilityIndexScope::VisibilityIndexScope(const VAbstractPattern *doc)
+  : m_doc(doc)
+{
+    if (m_doc != nullptr && m_doc->m_visibilityIndexScopes++ == 0)
+    {
+        m_doc->InvalidateVisibilityIndex(); // a fresh index for every outermost scope
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+VAbstractPattern::VisibilityIndexScope::~VisibilityIndexScope()
+{
+    if (m_doc != nullptr && --m_doc->m_visibilityIndexScopes == 0)
+    {
+        m_doc->InvalidateVisibilityIndex();
+    }
 }
 
 //---------------------------------------------------------------------------------------------------------------------
@@ -1228,6 +1326,214 @@ void VAbstractPattern::SetCartoucheTemplate(const QString &name)
 }
 
 //---------------------------------------------------------------------------------------------------------------------
+auto VAbstractPattern::ExistingPatternVersions() const -> QDomElement
+{
+    return UniqueTag(TagPatternVersions);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+auto VAbstractPattern::PatternVersionElement(quint32 id) const -> QDomElement
+{
+    const QDomElement container = ExistingPatternVersions();
+    if (container.isNull())
+    {
+        return {};
+    }
+
+    for (QDomElement child = container.firstChildElement(TagPatternVersion); not child.isNull();
+         child = child.nextSiblingElement(TagPatternVersion))
+    {
+        if (child.attribute(AttrKey).toUInt() == id)
+        {
+            return child;
+        }
+    }
+    return {};
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+auto VAbstractPattern::AllVersionsName() -> QString
+{
+    // A name the reader sees, not a tag: translated like every UI string, and stored only once the list
+    // exists — a single-version pattern carries no name at all.
+    return QCoreApplication::translate("VAbstractPattern", "All versions");
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+auto VAbstractPattern::GetPatternVersions() const -> QVector<VPatternVersionData>
+{
+    QVector<VPatternVersionData> versions;
+    const QDomElement container = ExistingPatternVersions();
+    if (container.isNull())
+    {
+        return versions;
+    }
+
+    for (QDomElement child = container.firstChildElement(TagPatternVersion); not child.isNull();
+         child = child.nextSiblingElement(TagPatternVersion))
+    {
+        VPatternVersionData version;
+        version.id = child.attribute(AttrKey).toUInt();
+        version.name = child.attribute(AttrName);
+        if (version.id == 0 || version.name.isEmpty())
+        {
+            continue;
+        }
+        versions.append(version);
+    }
+    return versions;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+auto VAbstractPattern::AllVersionsId() const -> quint32
+{
+    const QVector<VPatternVersionData> versions = GetPatternVersions();
+    return versions.isEmpty() ? 1 : versions.first().id;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+auto VAbstractPattern::GetPatternVersion(quint32 id) const -> VPatternVersionData
+{
+    const QVector<VPatternVersionData> versions = GetPatternVersions();
+    for (const VPatternVersionData &version : versions)
+    {
+        if (version.id == id)
+        {
+            return version;
+        }
+    }
+
+    // An id the document does not know reads as the entry every piece belongs to, so a piece can never
+    // end up wearing nothing: a version deleted by hand leaves it among the pieces of no version.
+    VPatternVersionData fallback;
+    if (not versions.isEmpty())
+    {
+        fallback = versions.first();
+    }
+    else
+    {
+        fallback.id = 1;
+        fallback.name = AllVersionsName();
+    }
+    return fallback;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+auto VAbstractPattern::IsMultiVersion() const -> bool
+{
+    const QDomElement container = ExistingPatternVersions();
+    // Absent attribute = on: the element only exists because someone turned the mode on.
+    return not container.isNull() && container.attribute(AttrActive) != QLatin1String("false");
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void VAbstractPattern::SetMultiVersion(bool on)
+{
+    QDomElement container = ExistingPatternVersions();
+    if (on)
+    {
+        if (container.isNull())
+        {
+            container = CheckTagExists(TagPatternVersions);
+        }
+
+        container.removeAttribute(AttrActive);
+        if (GetPatternVersions().isEmpty())
+        {
+            // The "all versions" entry: where every piece already lives, so turning the mode on changes no
+            // piece. The reader may rename it; nothing removes it.
+            QDomElement version = createElement(TagPatternVersion);
+            version.setAttribute(AttrKey, QStringLiteral("1"));
+            version.setAttribute(AttrName, AllVersionsName());
+            container.appendChild(version);
+        }
+    }
+    else if (not container.isNull())
+    {
+        // The list stays: turning the mode off is a decision about the pieces, not an order to throw away
+        // names the reader typed. Turning it back on finds them where they were.
+        container.setAttribute(AttrActive, QStringLiteral("false"));
+    }
+
+    modified = true;
+    emit patternChanged(false);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+auto VAbstractPattern::AddPatternVersion(const QString &name) -> quint32
+{
+    QDomElement container = ExistingPatternVersions();
+    if (container.isNull())
+    {
+        container = CheckTagExists(TagPatternVersions);
+    }
+
+    if (GetPatternVersions().isEmpty())
+    {
+        // The list must start with "all versions"; a version added to nothing would become the entry
+        // every unassigned piece belongs to, and its name would change meaning behind the reader's back.
+        QDomElement all = createElement(TagPatternVersion);
+        all.setAttribute(AttrKey, QStringLiteral("1"));
+        all.setAttribute(AttrName, AllVersionsName());
+        container.appendChild(all);
+    }
+
+    quint32 nextId = 1;
+    for (const VPatternVersionData &version : GetPatternVersions())
+    {
+        if (version.id + 1 > nextId)
+        {
+            nextId = version.id + 1;
+        }
+    }
+
+    QDomElement version = createElement(TagPatternVersion);
+    version.setAttribute(AttrKey, QString::number(nextId));
+    version.setAttribute(AttrName, name);
+    container.appendChild(version);
+
+    modified = true;
+    emit patternChanged(false);
+    return nextId;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+bool VAbstractPattern::RenamePatternVersion(quint32 id, const QString &name)
+{
+    QDomElement version = PatternVersionElement(id);
+    if (version.isNull() || name.isEmpty())
+    {
+        return false;
+    }
+
+    version.setAttribute(AttrName, name);
+    modified = true;
+    emit patternChanged(false);
+    return true;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+bool VAbstractPattern::RemovePatternVersion(quint32 id)
+{
+    if (id == AllVersionsId())
+    {
+        // Not a version among others: it is where the pieces that belong to none live.
+        return false;
+    }
+
+    const QDomElement version = PatternVersionElement(id);
+    if (version.isNull())
+    {
+        return false;
+    }
+
+    version.parentNode().removeChild(version);
+    modified = true;
+    emit patternChanged(false);
+    return true;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
 auto VAbstractPattern::GetCompanyName() const -> QString
 {
     return m_companyName;
@@ -1642,6 +1948,7 @@ void VAbstractPattern::SelectedDetail(quint32 id)
 //---------------------------------------------------------------------------------------------------------------------
 void VAbstractPattern::UpdateVisiblityGroups()
 {
+    InvalidateVisibilityIndex(); // the layers change: IsObjectVisible must not answer from the old index
     emit UpdateGroups();
 }
 
@@ -1735,6 +2042,18 @@ void VAbstractPattern::FindFormulaDependencies(const QString &formula,
 }
 
 //---------------------------------------------------------------------------------------------------------------------
+auto VAbstractPattern::DependencyVariables(const VContainer *data) const -> QHash<QString, QList<quint32>>
+{
+    // The same condition FindFormulaDependencies returns on: an empty table makes it return as well, earlier.
+    if (data == nullptr || m_patternGraph == nullptr || !m_patternGraph->IsGraphRebuildEnabled())
+    {
+        return {};
+    }
+
+    return data->DataDependencyVariables();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
 auto VAbstractPattern::IsPatternGraphComplete() const -> bool
 {
     if (!m_watchersMutex.tryLock(100))
@@ -1794,25 +2113,26 @@ auto VAbstractPattern::RootElementOrder() -> const QStringList &
         TagCollection,          // 6
         TagPatternName,         // 7
         TagPatternNum,          // 8
-        TagCompanyName,         // 9
-        TagCustomerName,        // 10
-        TagCustomerBirthDate,   // 11
-        TagCustomerEmail,       // 12
-        TagWatermark,           // 13
-        TagCartouche,           // 14
-        TagPatternMaterials,    // 15
-        TagFinalMeasurements,   // 16
-        TagBackgroundImages,    // 17
-        TagCoverPage,           // 18
-        TagMeasurements,             // 19 required
-        TagIncrements,               // 20 required
-        TagIncrementGroups,          // 21
-        TagPreviewCalculations,      // 22 required
-        TagPreviewCalculationGroups, // 23
-        TagLineNames,                // 24
-        TagDraw,                     // 25 one or more
-        TagPieceGroups,              // 26
-        TagSizeRanges,               // 27
+        TagPatternVersions,     // 9
+        TagCompanyName,         // 10
+        TagCustomerName,        // 11
+        TagCustomerBirthDate,   // 12
+        TagCustomerEmail,       // 13
+        TagWatermark,           // 14
+        TagCartouche,           // 15
+        TagPatternMaterials,    // 16
+        TagFinalMeasurements,   // 17
+        TagBackgroundImages,    // 18
+        TagCoverPage,           // 19
+        TagMeasurements,             // 20 required
+        TagIncrements,               // 21 required
+        TagIncrementGroups,          // 22
+        TagPreviewCalculations,      // 23 required
+        TagPreviewCalculationGroups, // 24
+        TagLineNames,                // 25
+        TagDraw,                     // 26 one or more
+        TagPieceGroups,              // 27
+        TagSizeRanges,               // 28
     };
     return kOrder;
 }
@@ -1880,9 +2200,9 @@ auto VAbstractPattern::CheckTagExists(const QString &tag) -> QDomElement
     // it has one answer for everybody — see RootElementOrder.
     static const QStringList kCreatable{
         TagImage,   TagDescription, TagNotes,      TagFabricInfo,     TagCollection,
-        TagPatternName, TagPatternNum, TagCompanyName, TagCustomerName, TagCustomerBirthDate,
-        TagCustomerEmail, TagWatermark, TagCartouche, TagFinalMeasurements, TagBackgroundImages,
-        TagCoverPage};
+        TagPatternName, TagPatternNum, TagPatternVersions, TagCompanyName, TagCustomerName,
+        TagCustomerBirthDate, TagCustomerEmail, TagWatermark, TagCartouche, TagFinalMeasurements,
+        TagBackgroundImages, TagCoverPage};
 
     if (not kCreatable.contains(tag))
     {
@@ -2555,6 +2875,7 @@ void VAbstractPattern::NotifyPatternChanged()
 //---------------------------------------------------------------------------------------------------------------------
 auto VAbstractPattern::CreateGroups(const QString &patternPieceName) -> QDomElement
 {
+    InvalidateVisibilityIndex(); // the layers change: IsObjectVisible must not answer from the old index
     QDomElement draw = patternPieceName.isEmpty() ? m_patternBlockMapper->GetActiveElement()
                                                   : m_patternBlockMapper->GetElement(patternPieceName);
 
@@ -2587,6 +2908,7 @@ auto VAbstractPattern::CreateGroups(const QString &patternPieceName) -> QDomElem
 //---------------------------------------------------------------------------------------------------------------------
 auto VAbstractPattern::CreateLayerGroups(const QString &patternPieceName) -> QDomElement
 {
+    InvalidateVisibilityIndex(); // the layers change: IsObjectVisible must not answer from the old index
     QDomElement draw = patternPieceName.isEmpty() ? m_patternBlockMapper->GetActiveElement()
                                                   : m_patternBlockMapper->GetElement(patternPieceName);
 
@@ -2625,6 +2947,7 @@ auto VAbstractPattern::CreateGroup(quint32 id,
                                    const QString &penStyle,
                                    quint32 layerGroup) -> QDomElement
 {
+    InvalidateVisibilityIndex(); // the layers change: IsObjectVisible must not answer from the old index
     if (id == NULL_ID)
     {
         return QDomElement();
@@ -2665,6 +2988,7 @@ auto VAbstractPattern::CreateGroup(quint32 id,
 auto VAbstractPattern::CreateAutomaticGroup(quint32 id, const QString &name,
                                             const QMap<quint32, quint32> &groupData) -> QDomElement
 {
+    InvalidateVisibilityIndex(); // the layers change: IsObjectVisible must not answer from the old index
     QDomElement group = CreateGroup(id, name, groupData);
     if (not group.isNull())
     {
@@ -2758,6 +3082,7 @@ void VAbstractPattern::SetGroupPen(quint32 id, const QString &color, const QStri
 //---------------------------------------------------------------------------------------------------------------------
 void VAbstractPattern::SetGroupVisibility(quint32 id, bool visible)
 {
+    InvalidateVisibilityIndex(); // the layers change: IsObjectVisible must not answer from the old index
     QDomElement group = FindElementById(id, TagGroup);
     if (group.isNull())
     {
@@ -3821,6 +4146,7 @@ void VAbstractPattern::CleanDependenciesWatcher()
  */
 auto VAbstractPattern::AddItemToGroup(quint32 toolId, quint32 objectId, quint32 groupId) -> QDomElement
 {
+    InvalidateVisibilityIndex(); // the layers change: IsObjectVisible must not answer from the old index
     if (QDomElement group = FindElementById(groupId, TagGroup); not group.isNull())
     {
         if (objectId == 0)
@@ -3868,6 +4194,7 @@ auto VAbstractPattern::AddItemToGroup(quint32 toolId, quint32 objectId, quint32 
 //---------------------------------------------------------------------------------------------------------------------
 auto VAbstractPattern::AddItemsToGroup(const QVector<QPair<quint32, quint32>> &items, quint32 groupId) -> bool
 {
+    InvalidateVisibilityIndex(); // the layers change: IsObjectVisible must not answer from the old index
     QDomElement group = FindElementById(groupId, TagGroup);
     if (group.isNull() || items.isEmpty())
     {
@@ -3907,6 +4234,99 @@ auto VAbstractPattern::AddItemsToGroup(const QVector<QPair<quint32, quint32>> &i
     return true;
 }
 
+namespace
+{
+//---------------------------------------------------------------------------------------------------------------------
+/** @brief The ids an encoded piece list carries.
+ *
+ * A curve or a copy that a cut has split keeps the ids of the pieces it draws in an attribute — `portionIds` on a
+ * spline path, `pieceIds` on the item of an operation's destination — and the shape is `key=id` or `key=name=id`,
+ * parts joined by `;` (`OSplinePathPortions::EncodePieces` / `DecodePieces`). libs/ifc cannot reach that class (it
+ * belongs to libs/vtools), so the shape is read here, by the only rule the writer promises: the id is the LAST '='
+ * field of a part.
+ *
+ * @param value the attribute as the file holds it
+ * @return the ids, in the order the attribute names them
+ */
+auto EncodedPieceIds(const QString &value) -> QVector<quint32>
+{
+    QVector<quint32> ids;
+
+    for (const QString &part : value.split(QLatin1Char(';'), Qt::SkipEmptyParts))
+    {
+        const QStringList fields = part.split(QLatin1Char('='));
+        if (fields.size() < 2)
+        {
+            continue;
+        }
+
+        if (const quint32 id = fields.constLast().trimmed().toUInt(); id != NULL_ID)
+        {
+            ids.append(id);
+        }
+    }
+
+    return ids;
+}
+} // namespace
+
+//---------------------------------------------------------------------------------------------------------------------
+auto VAbstractPattern::DrawnPieceIds(const QDomElement &item, VAbstractPattern *doc) -> QVector<quint32>
+{
+    QVector<quint32> ids;
+
+    const QString value = item.attribute(QStringLiteral("pieceIds"));
+    if (value.isEmpty())
+    {
+        return ids;
+    }
+
+    for (const QString &part : value.split(QLatin1Char(';'), Qt::SkipEmptyParts))
+    {
+        const QStringList fields = part.split(QLatin1Char('='));
+        if (fields.size() < 2)
+        {
+            continue;
+        }
+
+        const QString key = fields.constFirst().trimmed();
+        const quint32 pieceId = fields.constLast().trimmed().toUInt();
+        if (key.isEmpty() || pieceId == NULL_ID)
+        {
+            continue;
+        }
+
+        // A run — the curve between two of its nodes — is always drawn: it IS the copy, cut into the pieces the
+        // figure asks for.
+        if (key.startsWith(QLatin1Char('n')))
+        {
+            ids.append(pieceId);
+            continue;
+        }
+
+        // A half of a cut is drawn only where that cut shows its two segments; otherwise the cut replaces nothing
+        // and the whole curve stays on the canvas. The keys are `c<cut id>-<half>` (OCopyPieces::CutKey), so the
+        // cut is read from the key and asked about its own element.
+        if (key.startsWith(QLatin1Char('c')) && doc != nullptr)
+        {
+            bool ok = false;
+            const quint32 cutId = key.mid(1).section(QLatin1Char('-'), 0, 0).toUInt(&ok);
+            if (not ok || cutId == NULL_ID)
+            {
+                continue;
+            }
+
+            const QDomElement cut = doc->FindElementById(cutId);
+            if (not cut.isNull() && cut.attribute(AttrShowTwoSegments) == trueStr)
+            {
+                ids.append(pieceId);
+            }
+        }
+    }
+
+    return ids;
+}
+
 //---------------------------------------------------------------------------------------------------------------------
 auto VAbstractPattern::IsCutPoint(const QDomElement &pointElement) -> bool
 {
@@ -3923,7 +4343,8 @@ auto VAbstractPattern::IsCutPoint(const QDomElement &pointElement) -> bool
 }
 
 //---------------------------------------------------------------------------------------------------------------------
-auto VAbstractPattern::LayerableObjectsOfTool(const QDomElement &toolElement, quint32 toolId)
+auto VAbstractPattern::LayerableObjectsOfTool(const QDomElement &toolElement, quint32 toolId,
+                                              VAbstractPattern *doc, bool drawnOnly)
     -> QVector<QPair<quint32, quint32>>
 {
     QVector<QPair<quint32, quint32>> objects;
@@ -3962,7 +4383,12 @@ auto VAbstractPattern::LayerableObjectsOfTool(const QDomElement &toolElement, qu
         // the other — so they are enumerated here like any other object of the tool. The loading pass and the
         // dock both read this list: a pair written by the transfer of a single half therefore stays valid.
         // The other point tools that write these attributes do NOT draw their segments (IsCutPoint).
-        if (IsCutPoint(toolElement))
+        //
+        // Only while the cut shows them, though: with the box off the cut replaces nothing, the whole base curve
+        // stays on the canvas and the two halves are not drawn. A layer holds what is drawn, so naming one of them
+        // would put in a layer an object the canvas never shows — the one thing that must not happen.
+        if (IsCutPoint(toolElement)
+            && (not drawnOnly || toolElement.attribute(AttrShowTwoSegments) == trueStr))
         {
             for (const QString &attribute : {AttrSegment1Id, AttrSegment2Id})
             {
@@ -3980,6 +4406,42 @@ auto VAbstractPattern::LayerableObjectsOfTool(const QDomElement &toolElement, qu
     else if (tag == TagLine || tag == TagArc || tag == TagElArc || tag == TagSpline)
     {
         objects.append({toolId, toolId});
+
+        // The armhole curve splits itself at the carrure and DRAWS the two pieces in place of the whole curve
+        // (`segmentAtCarrure`): they are objects of the pattern, exactly as a cut's halves are, and they live as
+        // attributes of the very `<spline>` that draws them. That is the one tool writing them on a curve — every
+        // other one writes them on a `<point>`. Without this, the pieces belonged to no layer at all: no dock could
+        // name them, and the whole "nothing sits outside a layer" rule left them out.
+        //
+        // Only while the box is ticked, though. Unticking it keeps an id only for what was built on that piece,
+        // and a piece nothing draws is not layer content — the same answer the sub-curves of an intersection point
+        // get, and the reason a layer never counts an object the canvas cannot show.
+        if (tag != TagSpline || not drawnOnly
+            || toolElement.attribute(AttrSegmentAtCarrure) == trueStr)
+        {
+            for (const QString &attribute : {AttrSegment1Id, AttrSegment2Id})
+            {
+                if (not toolElement.hasAttribute(attribute))
+                {
+                    continue;
+                }
+                if (const quint32 segmentId = toolElement.attribute(attribute).toUInt(); segmentId != NULL_ID)
+                {
+                    objects.append({segmentId, toolId});
+                }
+            }
+        }
+
+        // A spline path segmented at its nodes draws pieces too, and keeps their ids in `portionIds`. Same reason as
+        // above: a drawn piece that no layer can name is a drawing no layer owns, and the loading passes cannot
+        // even see it.
+        if (toolElement.hasAttribute(AttrPortionIds))
+        {
+            for (const quint32 portionId : EncodedPieceIds(toolElement.attribute(AttrPortionIds)))
+            {
+                objects.append({portionId, toolId});
+            }
+        }
     }
     else if (tag == TagOperation)
     {
@@ -3989,6 +4451,44 @@ auto VAbstractPattern::LayerableObjectsOfTool(const QDomElement &toolElement, qu
         for (QDomElement item = destination.firstChildElement(QStringLiteral("item")); !item.isNull();
              item = item.nextSiblingElement(QStringLiteral("item")))
         {
+            // A copy a cut has split is not drawn at all: the canvas shows the pieces it was replaced with
+            // (OCopyPieces), and a layer holds what the canvas shows. The copy gives way to them — the runs the
+            // curve is cut into, and the halves of the cuts that show their two segments — so a layer never names
+            // an object nobody can see, and the delete of a layer never counts one either.
+            //
+            // UNLESS no piece is drawn. `pieceIds` is written as soon as the pieces exist, whatever the cuts' boxes
+            // say — a half is stored even when its cut shows one segment only — and with every box off nothing
+            // replaces the copy: it is drawn whole, as before. Reading the attribute alone and giving way there took
+            // the copy out of every layer of the file (the loading pass judges the pair stale and removes it in
+            // silence), and a curve no layer names is drawn whatever the layers say: measured on a client's file,
+            // twenty copies came back on screen outside their hidden layers. So the copy is layerable whenever it is
+            // drawn, and only the pair of the drawn pieces is offered when one of them takes its place.
+            if (item.hasAttribute(QStringLiteral("pieceIds")))
+            {
+                if (not drawnOnly)
+                {
+                    // The other question: what the element DECLARES, drawn or not. The copy is still a real object
+                    // — a layer written before the pieces existed names it — and so is every piece the attribute
+                    // encodes, whatever its cut shows today.
+                    for (const quint32 pieceId : EncodedPieceIds(item.attribute(QStringLiteral("pieceIds"))))
+                    {
+                        objects.append({pieceId, toolId});
+                    }
+                }
+                else
+                {
+                    const QVector<quint32> drawn = DrawnPieceIds(item, doc);
+                    if (not drawn.isEmpty())
+                    {
+                        for (const quint32 pieceId : drawn)
+                        {
+                            objects.append({pieceId, toolId});
+                        }
+                        continue;
+                    }
+                }
+            }
+
             if (const quint32 objectId = item.attribute(AttrIdObject).toUInt(); objectId != NULL_ID)
             {
                 objects.append({objectId, toolId});
@@ -4003,6 +4503,20 @@ auto VAbstractPattern::LayerableObjectsOfTool(const QDomElement &toolElement, qu
                 resultId != NULL_ID)
             {
                 objects.append({resultId, resultId});
+            }
+        }
+
+        // The places a move by batch passes through are objects of the operation, written in an `intermediates`
+        // element of their own and named by their `point` attribute. They are drawn — the user asked for them —
+        // and they were the one family of operation objects no branch here knew: their pairs were judged stale
+        // and taken out of the layers at the next open, in silence.
+        const QDomElement intermediates = toolElement.firstChildElement(QStringLiteral("intermediates"));
+        for (QDomElement item = intermediates.firstChildElement(QStringLiteral("item")); !item.isNull();
+             item = item.nextSiblingElement(QStringLiteral("item")))
+        {
+            if (const quint32 pointId = item.attribute(QStringLiteral("point")).toUInt(); pointId != NULL_ID)
+            {
+                objects.append({pointId, toolId});
             }
         }
 
@@ -4078,7 +4592,7 @@ auto VAbstractPattern::LayerableObjectsOfTool(quint32 toolId) -> QVector<QPair<q
 
     if (const QDomElement element = FindElementById(toolId); not element.isNull())
     {
-        return LayerableObjectsOfTool(element, toolId);
+        return LayerableObjectsOfTool(element, toolId, this);
     }
 
     // No element of its own: only a line an operation produced is in that state. The tool exists — VToolLine was
@@ -4117,6 +4631,7 @@ auto VAbstractPattern::GetActiveGroupPenStyle() -> QString
  */
 auto VAbstractPattern::RemoveItemFromGroup(quint32 toolId, quint32 objectId, quint32 groupId) -> QDomElement
 {
+    InvalidateVisibilityIndex(); // the layers change: IsObjectVisible must not answer from the old index
     if (QDomElement group = FindElementById(groupId, TagGroup); not group.isNull())
     {
         if (objectId == 0)

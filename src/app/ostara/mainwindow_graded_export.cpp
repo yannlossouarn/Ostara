@@ -130,7 +130,7 @@ bool MainWindow::ExportGradedRangeTo(const QString &rangeName, const QString &fo
         if (showDialogs)
         {
             QMessageBox::information(this, tr("Graded mode"),
-                                     tr("This size range needs its measurements table loaded."),
+                                     tr("This size range needs its measurements table loaded. Load it from the Measurements menu, then try again."),
                                      QMessageBox::Ok);
         }
         return false;
@@ -170,11 +170,14 @@ bool MainWindow::ExportGradedRangeTo(const QString &rangeName, const QString &fo
     {
         if (errorOut != nullptr)
         {
-            *errorOut = tr("Cannot create the export folder.");
+            *errorOut = tr("Ostara could not create the export folder. Check that you are allowed to write in "
+                           "the chosen folder, or choose another one.");
         }
         if (showDialogs)
         {
-            QMessageBox::warning(this, tr("Graded mode"), tr("Cannot create the export folder."),
+            QMessageBox::warning(this, tr("Graded mode"),
+                                 tr("Ostara could not create the export folder. Check that you are allowed to "
+                                    "write in the chosen folder, or choose another one."),
                                  QMessageBox::Ok);
         }
         return false;
@@ -344,6 +347,18 @@ bool MainWindow::ExportGradedRangeTo(const QString &rangeName, const QString &fo
         // The very rule the canvas applies, on the pieces themselves (OGroupSuperpose).
         OGroupSuperpose::Snap(details, pieces, pattern);
 
+        // …and the other rule the canvas applies: a piece the patternmaker shows mirrored is turned
+        // over before it is drawn. Same call, same axis as `BuildGradedScene`, so the exported range
+        // and the canvas it was taken from cannot disagree — and this drawing is also the payload a
+        // PDF carries.
+        for (VLayoutPiece &piece : pieces)
+        {
+            if (piece.IsForceFlipping())
+            {
+                piece.MirrorDisplayed();
+            }
+        }
+
 
         const int layerPos = idx - minIdx;
         const int z = layerCount - layerPos;
@@ -387,6 +402,11 @@ bool MainWindow::ExportGradedRangeTo(const QString &rangeName, const QString &fo
             if (!qIsNaN(alignPointX))
             {
                 item->setData(kGradedAlignPointXRole, alignPointX);
+            }
+            const qreal alignPointY = OGraded::UnitAlignPointY(pieceId, details.at(k).piece, pattern);
+            if (!qIsNaN(alignPointY))
+            {
+                item->setData(kGradedAlignPointYRole, alignPointY);
             }
             scene.addItem(item);
             itemsByPiece[pieceId].append(item);
@@ -473,7 +493,10 @@ bool MainWindow::ExportGradedRangeTo(const QString &rangeName, const QString &fo
         if (showDialogs)
         {
             QMessageBox::warning(this, tr("Graded mode"),
-                                 error.isEmpty() ? tr("The graded export failed.") : error,
+                                 error.isEmpty()
+                                     ? tr("The graded export failed. Check that the folder allows writing, and try "
+                                          "again.")
+                                     : error,
                                  QMessageBox::Ok);
         }
         return false;
@@ -766,11 +789,13 @@ bool MainWindow::ExportGradedRangeTo(const QString &rangeName, const QString &fo
     {
         if (errorOut != nullptr)
         {
-            *errorOut = tr("The SVG file could not be written.");
+            *errorOut = tr("The SVG file could not be written. Check that the folder allows writing, and that the file is not "
+                                           "open in another program.");
         }
         if (showDialogs)
         {
-            QMessageBox::warning(this, tr("Graded mode"), tr("The SVG file could not be written."),
+            QMessageBox::warning(this, tr("Graded mode"), tr("The SVG file could not be written. Check that the folder allows writing, and that the file is not "
+                                           "open in another program."),
                                  QMessageBox::Ok);
         }
         return false;
@@ -808,7 +833,8 @@ void MainWindow::ExportAllGradedRanges(const QString &dirPath)
     QDir dir(outDir);
     if (!dir.exists() && !dir.mkpath(QStringLiteral(".")))
     {
-        QMessageBox::warning(this, tr("Graded mode"), tr("Cannot create the export folder."),
+        QMessageBox::warning(this, tr("Graded mode"), tr("Ostara could not create the export folder. Check that you are allowed to write in the chosen "
+                                           "folder, or choose another one."),
                              QMessageBox::Ok);
         return;
     }
@@ -832,8 +858,7 @@ void MainWindow::ExportAllGradedRanges(const QString &dirPath)
 
     if (names.isEmpty())
     {
-        QMessageBox::information(this, tr("Graded mode"), tr("No size range to export."),
-                                 QMessageBox::Ok);
+        QMessageBox::information(this, tr("Graded mode"), tr("No size range to export."), QMessageBox::Ok);
         return;
     }
 
@@ -885,7 +910,10 @@ void MainWindow::ExportAllGradedRanges(const QString &dirPath)
         return;
     }
 
-    const QString text = lines.join(QLatin1Char('\n'));
+    const QString text = lines.join(QLatin1Char('\n'))
+                         + QStringLiteral("\n\n")
+                         + tr("Check that the folder allows writing, and that none of the files is open in another "
+                              "program.");
     if (writtenFiles.isEmpty() && !failedRanges.isEmpty())
     {
         QMessageBox::warning(this, tr("Graded mode"), text, QMessageBox::Ok);

@@ -203,6 +203,9 @@ void VPattern::CreateEmptyFile()
  */
 void VPattern::Parse(const Document &parse)
 {
+    // Every tool refreshed by this parse asks the layers about the points its tracés join: one index answers them all.
+    const VisibilityIndexScope visibilityIndex(this);
+
     emit PreParseState();
     SCASSERT(sceneDraw != nullptr)
     SCASSERT(sceneDetail != nullptr)
@@ -340,6 +343,43 @@ void VPattern::Parse(const Document &parse)
 }
 
 //---------------------------------------------------------------------------------------------------------------------
+namespace
+{
+/**
+ * @brief The highest id one attribute value mentions.
+ *
+ * A value that is an id answers it directly. A value that is a list of pairs does not: `portionIds` writes
+ * `node=id;node=id`, so it never parses as one number, and the rule that reads every attribute a tool writes
+ * an id into passed it by without a word. The ids of the pieces of a cut curve were then unknown to the
+ * counter: a reparse restarted below them, the next object the parser built took one of them, and the piece
+ * was overwritten — the source an operation named was gone by the time its copy was built. Reading a value as
+ * widely as it can be costs nothing: an id read that is not one only leaves a gap in the numbering.
+ */
+auto MaxIdMentionedIn(const QString &value) -> quint32
+{
+    bool ok = false;
+    quint32 maxId = value.toUInt(&ok);
+
+    if (ok)
+    {
+        return maxId;
+    }
+
+    for (const QString &part : value.split(QLatin1Char(';'), Qt::SkipEmptyParts))
+    {
+        const quint32 id = part.section(QLatin1Char('='), -1).trimmed().toUInt(&ok);
+
+        if (ok)
+        {
+            maxId = qMax(maxId, id);
+        }
+    }
+
+    return maxId;
+}
+} // namespace
+
+//---------------------------------------------------------------------------------------------------------------------
 /**
  * @brief The highest id the file mentions without declaring it.
  *
@@ -406,11 +446,15 @@ auto VPattern::MaxMentionedId() const -> quint32
             }
 
             bool ok = false;
-            const quint32 id = attribute.value().toUInt(&ok);
-            if (ok)
+            quint32 id = attribute.value().toUInt(&ok);
+            if (not ok)
             {
-                maxId = qMax(maxId, id);
+                // An attribute whose value is a list rather than an id — `portionIds` writes `node=id;…` —
+                // answers no single number: its ids are read one by one, since the counter has to start
+                // above the objects they name just as much as above the ones written as one number.
+                id = MaxIdMentionedIn(attribute.value());
             }
+            maxId = qMax(maxId, id);
         }
 
         for (QDomElement child = element.firstChildElement(); not child.isNull();
@@ -715,6 +759,20 @@ void VPattern::setCurrentData()
     // Delete special variables if exist
     data->RemoveVariable(currentLength);
     data->RemoveVariable(currentSeamAllowance);
+
+    // The container has just been replaced by a copy one tool took when it was read — before that tool, or any
+    // tool after it, built the objects it derives. Those objects are in the file, they are drawn, and this
+    // container no longer holds them: every lookup by id failed with `ExceptionBadId` — the preview of an
+    // operation skipped the piece it was told to show, and the operation copied nothing. Each tool puts back
+    // what it derived, under the ids the file gave, and the container agrees with the drawing again.
+    for (VDataTool *tool : std::as_const(tools))
+    {
+        if (tool != nullptr)
+        {
+            tool->RebuildDerivedObjects();
+        }
+    }
+
     qCDebug(vXML, "Data successfully updated.");
 }
 
@@ -873,7 +931,15 @@ auto VPattern::SaveDocument(const QString &fileName, QString &error) -> bool
     }
     catch (const VExceptionWrongId &e)
     {
-        qCCritical(vXML, "%s\n\n%s\n\n%s", qUtf8Printable(tr("Error not unique id.")), qUtf8Printable(e.ErrorMessage()),
+        // The out-parameter is the detail the "Could not save the file" dialog shows under its message. Returning
+        // false without filling it opened that dialog over an empty line, which told the reader neither what was
+        // wrong nor what to do about it.
+        error = tr("Two objects would carry the same identifier, so the file was not written.");
+        if (const QString detail = e.ErrorMessage(); !detail.isEmpty())
+        {
+            error += QStringLiteral("\n") + detail;
+        }
+        qCWarning(vXML, "%s\n\n%s\n\n%s", qUtf8Printable(tr("Error not unique id.")), qUtf8Printable(e.ErrorMessage()),
                    qUtf8Printable(e.DetailedInformation()));
         return false;
     }
@@ -926,15 +992,21 @@ void VPattern::LiteParseTree(const Document &parse)
     // Save current pattern block name
     QString const namePP = PatternBlockMapper()->GetActive();
 
+    // The parse below and the refresh of every tool after it ask the layers the same questions: one index for both.
+    const VisibilityIndexScope visibilityIndex(this);
+
     try
     {
         emit SetEnabledGUI(true);
         switch (parse)
         {
             case Document::LitePPParse:
+            {
                 PatternGraph()->SetGraphRebuildEnabled(false);
+                // Back on even when the block fails to read: a graph left frozen would miss every later edit.
+                const auto graphGuard = qScopeGuard([this]() { PatternGraph()->SetGraphRebuildEnabled(true); });
                 ParseCurrentPP();
-                PatternGraph()->SetGraphRebuildEnabled(true);
+            }
                 // The active block alone, because this is a drag. What it cannot cover — a tool of another
                 // piece reading this one, a transfer's copies or a formula in a later piece — is caught up
                 // once the gesture has settled.
@@ -970,65 +1042,41 @@ void VPattern::LiteParseTree(const Document &parse)
     {
         qCCritical(vXML, "%s\n\n%s\n\n%s", qUtf8Printable(tr("Error parsing file.")), //-V807
                    qUtf8Printable(e.ErrorMessage()), qUtf8Printable(e.DetailedInformation()));
-        emit SetEnabledGUI(false);
-        if (not VApplication::IsGUIMode())
-        {
-            QCoreApplication::exit(V_EX_NOINPUT);
-        }
+        RecoverFromFailedLiteParse(parse);
         return;
     }
     catch (const VExceptionConversionError &e)
     {
         qCCritical(vXML, "%s\n\n%s\n\n%s", qUtf8Printable(tr("Error can't convert value.")),
                    qUtf8Printable(e.ErrorMessage()), qUtf8Printable(e.DetailedInformation()));
-        emit SetEnabledGUI(false);
-        if (not VApplication::IsGUIMode())
-        {
-            QCoreApplication::exit(V_EX_NOINPUT);
-        }
+        RecoverFromFailedLiteParse(parse);
         return;
     }
     catch (const VExceptionEmptyParameter &e)
     {
         qCCritical(vXML, "%s\n\n%s\n\n%s", qUtf8Printable(tr("Error empty parameter.")),
                    qUtf8Printable(e.ErrorMessage()), qUtf8Printable(e.DetailedInformation()));
-        emit SetEnabledGUI(false);
-        if (not VApplication::IsGUIMode())
-        {
-            QCoreApplication::exit(V_EX_NOINPUT);
-        }
+        RecoverFromFailedLiteParse(parse);
         return;
     }
     catch (const VExceptionWrongId &e)
     {
         qCCritical(vXML, "%s\n\n%s\n\n%s", qUtf8Printable(tr("Error wrong id.")), qUtf8Printable(e.ErrorMessage()),
                    qUtf8Printable(e.DetailedInformation()));
-        emit SetEnabledGUI(false);
-        if (not VApplication::IsGUIMode())
-        {
-            QCoreApplication::exit(V_EX_NOINPUT);
-        }
+        RecoverFromFailedLiteParse(parse);
         return;
     }
     catch (VException &e)
     {
         qCCritical(vXML, "%s\n\n%s\n\n%s", qUtf8Printable(tr("Error parsing file.")), qUtf8Printable(e.ErrorMessage()),
                    qUtf8Printable(e.DetailedInformation()));
-        emit SetEnabledGUI(false);
-        if (not VApplication::IsGUIMode())
-        {
-            QCoreApplication::exit(V_EX_NOINPUT);
-        }
+        RecoverFromFailedLiteParse(parse);
         return;
     }
     catch (const std::bad_alloc &)
     {
         qCCritical(vXML, "%s", qUtf8Printable(tr("Error parsing file (std::bad_alloc).")));
-        emit SetEnabledGUI(false);
-        if (not VApplication::IsGUIMode())
-        {
-            QCoreApplication::exit(V_EX_NOINPUT);
-        }
+        RecoverFromFailedLiteParse(parse);
         return;
     }
 
@@ -1044,17 +1092,62 @@ void VPattern::LiteParseTree(const Document &parse)
     {
         qCCritical(vXML, "%s\n\n%s\n\n%s", qUtf8Printable(tr("Error updating scene after parsing.")),
                    qUtf8Printable(e.ErrorMessage()), qUtf8Printable(e.DetailedInformation()));
-        emit SetEnabledGUI(false);
-        if (not VApplication::IsGUIMode())
-        {
-            QCoreApplication::exit(V_EX_NOINPUT);
-        }
+        RecoverFromFailedLiteParse(parse);
         return;
     }
     // Recalculate scene rect
     VMainGraphicsView::NewSceneRect(sceneDraw, VAbstractValApplication::VApp()->getSceneView());
     VMainGraphicsView::NewSceneRect(sceneDetail, VAbstractValApplication::VApp()->getSceneView());
     qCDebug(vXML, "Scene size updated.");
+
+    // The pattern reads again: a later failure may undo again.
+    m_liteParseUndoing = false;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void VPattern::RecoverFromFailedLiteParse(const Document &parse)
+{
+    if (not VApplication::IsGUIMode())
+    {
+        emit SetEnabledGUI(false);
+        QCoreApplication::exit(V_EX_NOINPUT);
+        return;
+    }
+
+    // Disabling the window was Valentina's answer to a file that cannot be read at all. In the middle of an edit it
+    // leaves the user with nothing: no canvas, no tool, no Save, an emptied Undo — only Quit, and no offer to save
+    // on the way out. An edit that breaks the reading is answered here instead, in the order that loses the least.
+
+    // 1. A drag reads the active block alone. Reading every block may well succeed where that partial read could not.
+    if (parse == Document::LitePPParse && not m_liteParseRetrying)
+    {
+        m_liteParseRetrying = true;
+        const auto retryGuard = qScopeGuard([this]() { m_liteParseRetrying = false; });
+        qCWarning(vXML, "The active block could not be read alone; reading every block instead.");
+        LiteParseTree(Document::LiteParse); // its own failure comes back here with LiteParse, to step 2
+        return;
+    }
+
+    // 2. Undo the change that broke the reading — once: an undo that fails in turn must not unwind the whole history.
+    QUndoStack *undoStack = VAbstractApplication::VApp()->getUndoStack();
+    if (not m_liteParseUndoing && undoStack != nullptr && undoStack->canUndo())
+    {
+        m_liteParseUndoing = true;
+        QApplication::postEvent(this, new UndoEvent());
+        // Said once the undo has run, never in the middle of a gesture.
+        QTimer::singleShot(0, this,
+                           []()
+                           {
+                               QMessageBox::information(
+                                   QApplication::activeWindow(), tr("Change undone"),
+                                   tr("This change could not be applied to the pattern, so it was undone. "
+                                      "Your pattern is unchanged and you can keep working."));
+                           });
+        return;
+    }
+
+    // 3. Nothing left to undo, or the undo failed too: the pattern cannot be read in its current state.
+    emit SetEnabledGUI(false);
 }
 
 //---------------------------------------------------------------------------------------------------------------------
@@ -1064,6 +1157,9 @@ void VPattern::customEvent(QEvent *event)
     if (event->type() == UNDO_EVENT)
     {
         VAbstractApplication::VApp()->getUndoStack()->undo();
+        // The undo may have queued its own reparse: the guard is released after it, so that a failure of that
+        // reparse still counts as the failed undo and does not undo once more.
+        QTimer::singleShot(0, this, [this]() { m_liteParseUndoing = false; });
     }
     else if (event->type() == LITE_PARSE_EVENT)
     {
@@ -1172,6 +1268,7 @@ void VPattern::ParsePieceGroups(const QDomElement &domElement)
                 group.alignPointSourceId = GetParametrUInt(groupElement, AttrGradedAlignPoint, QChar('0'));
                 group.alignPointMemberId = GetParametrUInt(groupElement, AttrGradedAlignPointMember, QChar('0'));
                 group.alignOnPoint = GetParametrBool(groupElement, AttrGradedAlignOnPoint, QStringLiteral("false"));
+                group.alignOnPointV = GetParametrBool(groupElement, AttrGradedAlignOnPointV, QStringLiteral("false"));
                 group.m_inLayout = GetParametrBool(groupElement, AttrInLayout, QStringLiteral("true"));
 
                 const uint groupPieceNumber = GetParametrUInt(groupElement, AttrPieceNumber, QChar('0'));

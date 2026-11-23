@@ -59,9 +59,13 @@ const QString AttrUUID = QStringLiteral("uuid");
 const QString AttrGradedAlignH = QStringLiteral("gradedAlignH");
 const QString AttrGradedAlignV = QStringLiteral("gradedAlignV");
 const QString AttrGradedAlignPoint = QStringLiteral("gradedAlignPoint");
+const QString AttrGradedAlignPointV = QStringLiteral("gradedAlignPointV");
 const QString AttrGradedAlignPointMember = QStringLiteral("gradedAlignPointMember");
 const QString AttrGradedAlignOnPoint = QStringLiteral("gradedAlignOnPoint");
+const QString AttrGradedAlignOnPointV = QStringLiteral("gradedAlignOnPointV");
 const QString AttrPieceNumber = QStringLiteral("pieceNumber");
+const QString AttrKey = QStringLiteral("key");
+const QString AttrPatternVersion = QStringLiteral("patternVersion");
 const QString AttrCutFabricQty = QStringLiteral("cutFabricQty");
 const QString AttrCutFabricOnFold = QStringLiteral("cutFabricOnFold");
 const QString AttrCutInterfacingQty = QStringLiteral("cutInterfacingQty");
@@ -210,6 +214,13 @@ const QString AttrCurveName2 = QStringLiteral("curveName2");
 const QString AttrSegment1Id = QStringLiteral("segment1Id");
 const QString AttrSegment2Id = QStringLiteral("segment2Id");
 const QString AttrShowTwoSegments = QStringLiteral("showTwoSegments");
+// The nodes of a spline path the user cut on — `cutNodes="2 3"` — and the ids the container gave the runs they
+// make, keyed by the two nodes of each run: `portionIds="0-2=101;2-3=102"` (`key=name=id` for a run kept for its
+// users; the older `3=102`, keyed by the node a run ends on, is still read).
+const QString AttrCutNodes = QStringLiteral("cutNodes");
+// The armhole curve, shown as the two pieces it is made of at the chest/back width point.
+const QString AttrSegmentAtCarrure = QStringLiteral("segmentAtCarrure");
+const QString AttrPortionIds = QStringLiteral("portionIds");
 const QString AttrSegment3Id = QStringLiteral("segment3Id");
 const QString AttrSegment4Id = QStringLiteral("segment4Id");
 const QString AttrSegment1Mx = QStringLiteral("segment1Mx");

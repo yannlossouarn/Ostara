@@ -30,6 +30,8 @@
 
 #include "vlayoutpiece.h"
 
+#include "vgraphicsfilledmarkitem.h"
+
 #include <QBrush>
 #include <QFlags>
 #include <QFont>
@@ -368,6 +370,10 @@ VLayoutPiece::~VLayoutPiece() = default;
 auto VLayoutPiece::Create(const VPiece &piece, vidtype id, const VContainer *pattern,
                           VAbstractPattern *doc) -> VLayoutPiece
 {
+    // Nothing below changes the piece or the container: its seam allowance, asked again by every passmark, is
+    // computed once per first node (see VPiece::SeamAllowanceMemoScope).
+    const VPiece::SeamAllowanceMemoScope saMemo;
+
     // Resolved ONCE, here: the application's answer costs a cartouche lookup, and a drawing asks for
     // the caption again on every repaint.
     const QString foldLineCaption = VFoldLine::ResolvedLabel(piece, doc);
@@ -1054,6 +1060,15 @@ void VLayoutPiece::Mirror()
 }
 
 //---------------------------------------------------------------------------------------------------------------------
+void VLayoutPiece::MirrorDisplayed()
+{
+    const QPointF centre = DetailBoundingRect().center();
+    // A vertical edge through the centre: `Mirror` reflects about the line that edge lies on, which
+    // is the vertical line x == centre.x() — the very axis the cutting plan uses.
+    Mirror(QLineF(centre.x(), centre.y(), centre.x(), centre.y() - 100.0));
+}
+
+//---------------------------------------------------------------------------------------------------------------------
 auto VLayoutPiece::DetailEdgesCount() const -> vsizetype
 {
     return DetailPath().count();
@@ -1347,6 +1362,15 @@ void VLayoutPiece::DrawMiniature(QPainter &painter, bool togetherWithNotches) co
 
     for (const auto &label : d->m_placeLabels)
     {
+        // A disc is painted with its own ink, as VGraphicsFilledMarkItem does for the real item.
+        if (IsFilledPlaceLabel(label.Type()))
+        {
+            QPainterStateGuard const guard(&painter);
+            painter.setBrush(painter.pen().color());
+            painter.drawPath(m.map(LabelShapePath(label)));
+            continue;
+        }
+
         painter.drawPath(m.map(LabelShapePath(label)));
     }
 
@@ -1386,7 +1410,11 @@ auto VLayoutPiece::GetItem(bool textAsPaths, bool togetherWithNotches, bool show
 
     for (const auto &label : d->m_placeLabels)
     {
-        auto *pathItem = new QGraphicsPathItem(item);
+        // A disc is an item of its own: its paint fills the shape with the pen's colour, so a size style or
+        // the ink pass of an export recolours the inside along with the outline.
+        auto *pathItem = IsFilledPlaceLabel(label.Type()) ? static_cast<QGraphicsPathItem *>(
+                                                                new VGraphicsFilledMarkItem(item))
+                                                          : new QGraphicsPathItem(item);
         QPen pen = pathItem->pen();
         pen.setWidthF(VAbstractApplication::VApp()->Settings()->WidthHairLine());
         pathItem->setPen(pen);
