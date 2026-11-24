@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.29)
-project(Ostara VERSION 1.2.0 LANGUAGES CXX)
+project(Ostara VERSION 1.2.1 LANGUAGES CXX)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # macOS : la version minimale est une POLITIQUE DU PROJET, pas un argument de commande.
